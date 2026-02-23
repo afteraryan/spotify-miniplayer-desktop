@@ -83,6 +83,9 @@ class SpotifyAPI:
             # Play a context from the beginning (e.g. a playlist)
             payload = {"context_uri": context_uri}
         elif context_uri:
+            # First: wipe old queue by playing the track alone (no context)
+            _api_put_play({"uris": [track_uri]}, token)
+            # Then: immediately play with album context for fresh queue generation
             payload = {
                 "context_uri": context_uri,
                 "offset": {"uri": track_uri},
@@ -90,21 +93,8 @@ class SpotifyAPI:
         else:
             payload = {"uris": [track_uri]}
 
-        body = json.dumps(payload).encode()
-
-        req = urllib.request.Request(
-            f"{_BASE}/me/player/play",
-            data=body,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-            },
-            method="PUT",
-        )
-
         try:
-            with urllib.request.urlopen(req) as resp:
-                pass
+            _api_put_play(payload, token)
         except urllib.error.HTTPError as e:
             if e.code == 404:
                 return False, "No active Spotify device — open Spotify first"
@@ -179,17 +169,7 @@ class SpotifyAPI:
                 pass
 
             # Replay without context (clears album queue)
-            payload = {"uris": [track_uri], "position_ms": progress}
-            req = urllib.request.Request(
-                f"{_BASE}/me/player/play",
-                data=json.dumps(payload).encode(),
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/json",
-                },
-                method="PUT",
-            )
-            urllib.request.urlopen(req)
+            _api_put_play({"uris": [track_uri], "position_ms": progress}, token)
 
             # Re-add radio songs sequentially (order matters)
             added = 0
@@ -274,3 +254,18 @@ def _api_get(path, token):
     )
     with urllib.request.urlopen(req) as resp:
         return json.loads(resp.read())
+
+
+def _api_put_play(payload, token):
+    """PUT /me/player/play. Raises on HTTP error."""
+    req = urllib.request.Request(
+        f"{_BASE}/me/player/play",
+        data=json.dumps(payload).encode(),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+        method="PUT",
+    )
+    with urllib.request.urlopen(req):
+        pass
