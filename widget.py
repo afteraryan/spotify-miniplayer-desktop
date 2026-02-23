@@ -32,7 +32,7 @@ from styles import (
     BG_COLOR, BORDER_COLOR, TEXT_COLOR,
     FONT_FAMILY, TITLE_SIZE, ARTIST_SIZE,
     PADDING, SPACING,
-    ICON_PREV, ICON_PLAY, ICON_PAUSE, ICON_NEXT, ICON_CLOSE, ICON_SEARCH,
+    ICON_PREV, ICON_PLAY, ICON_PAUSE, ICON_NEXT, ICON_CLOSE, ICON_SEARCH, ICON_LOADING,
     BUTTON_STYLE, CLOSE_BUTTON_STYLE,
     TITLE_STYLE, ARTIST_STYLE, NO_MUSIC_STYLE,
 )
@@ -124,10 +124,19 @@ class PlayerWidget(QWidget):
         self._hovered = False       # background visible only on hover
         self._hidden_for_fullscreen = False  # True while hiding for a fullscreen app
         self._search_expanded = False  # True while search icon is visible
+        self._search_mode = False      # True while in inline search mode
+        self._search_loading = False   # True while a search API call is in-flight
+        self._spinner_angle = 0        # rotation angle for loading spinner
 
         # Pre-build the two toggle icons
         self._icon_play = svg_to_icon(ICON_PLAY, ICON_SIZE)
         self._icon_pause = svg_to_icon(ICON_PAUSE, ICON_SIZE)
+        self._icon_search = svg_to_icon(ICON_SEARCH, ICON_SIZE)
+
+        # Spinner timer (rotates the search icon while loading)
+        self._spinner_timer = QTimer(self)
+        self._spinner_timer.setInterval(30)
+        self._spinner_timer.timeout.connect(self._spin_search_icon)
 
         # Media controller (talks to Windows SMTC on a background thread)
         self.media = MediaController()
@@ -259,12 +268,16 @@ class PlayerWidget(QWidget):
     # ── search icon animation ──────────────────────────────────
 
     def _setup_search_animations(self):
-        """Create the expand/collapse animation for the search icon."""
-        # Only animate the search button's maxWidth.
-        # The widget stays 310px — the text column (stretch) shrinks to make room.
+        """Create animations for the search icon hover and search mode transitions."""
+        # Search button slide in/out on hover
         self._anim_btn = QPropertyAnimation(self.btn_search, b"maximumWidth")
         self._anim_btn.setDuration(200)
         self._anim_btn.setEasingCurve(QEasingCurve.InOutCubic)
+
+        # Search input expand/collapse for search mode transition
+        self._anim_search_width = QPropertyAnimation(self._search_input, b"maximumWidth")
+        self._anim_search_width.setDuration(200)
+        self._anim_search_width.setEasingCurve(QEasingCurve.OutCubic)
 
     def _expand_search(self):
         """Slide the search icon in from the left, pushing art/text right."""
@@ -305,7 +318,7 @@ class PlayerWidget(QWidget):
 
     def _toggle_search(self):
         """Switch between player mode and search mode."""
-        if self._search_input.isVisible():
+        if self._search_mode:
             self._exit_search_mode()
             return
 
@@ -327,19 +340,31 @@ class PlayerWidget(QWidget):
         self._enter_search_mode()
 
     def _enter_search_mode(self):
-        """Transform the widget into a search box (player controls stay visible)."""
-        # Hide only art and text — playback buttons stay
+        """Transform the widget into a search box with slide animation."""
+        self._search_mode = True
+
+        # Hide art and text, show search input
         self.art_label.hide()
         self._text_container.hide()
 
-        # Show search input and focus it
         self._search_input.clear()
         self._search_input.show()
+        self._search_input.setMinimumWidth(0)
+        self._search_input.setMaximumWidth(0)
+
+        # Animate search input expanding from 0 to fill available space
+        self._anim_search_width.stop()
+        self._anim_search_width.setStartValue(0)
+        self._anim_search_width.setEndValue(WIDGET_WIDTH)
+        self._anim_search_width.start()
+
         self._search_input.setFocus()
 
         # Create the results popup but don't show it yet — it appears when results arrive
         self._search_popup = SearchPopup(self, self._spotify_api, inline=True)
         self._search_popup.closed.connect(self._on_search_popup_closed)
+        self._search_popup.search_started.connect(self._on_search_started)
+        self._search_popup.search_finished.connect(self._on_search_finished)
 
         # Wire inline input → popup search
         self._search_input.textChanged.connect(self._on_inline_search_text)
@@ -358,17 +383,26 @@ class PlayerWidget(QWidget):
 
     def _on_focus_changed(self, old, new):
         """Close search mode when focus leaves the widget and popup."""
-        if not self._search_input.isVisible():
+        if not self._search_mode:
             return
-        # If focus went to our search input or the popup, keep search open
-        if new and (new is self._search_input or
-                    (self._search_popup and self._search_popup.isAncestorOf(new))):
+        # If focus went to anything inside our widget or the popup, keep search open
+        # (let the widget's own click handlers decide what to do)
+        if new and (new is self or self.isAncestorOf(new) or
+                    (self._search_popup and
+                     (new is self._search_popup or self._search_popup.isAncestorOf(new)))):
             return
         # Focus left entirely — close search
         self._exit_search_mode()
 
     def _exit_search_mode(self):
-        """Restore the widget to player mode."""
+        """Restore the widget to player mode with slide animation."""
+        if not self._search_mode:
+            return
+        self._search_mode = False
+
+        # Stop loading spinner
+        self._set_search_loading(False)
+
         # Disconnect inline input signals
         try:
             self._search_input.textChanged.disconnect(self._on_inline_search_text)
@@ -383,16 +417,28 @@ class PlayerWidget(QWidget):
         if self._search_popup and self._search_popup.isVisible():
             self._search_popup.close()
 
-        # Hide search input
+        # Animate search input collapsing, then restore player UI
+        self._anim_search_width.stop()
+        self._anim_search_width.setStartValue(self._search_input.maximumWidth())
+        self._anim_search_width.setEndValue(0)
+        self._anim_search_width.finished.connect(self._on_search_collapse_done)
+        self._anim_search_width.start()
+
+    def _on_search_collapse_done(self):
+        """Called when the search input collapse animation finishes."""
+        # Disconnect so it doesn't fire again on next animation
+        try:
+            self._anim_search_width.finished.disconnect(self._on_search_collapse_done)
+        except RuntimeError:
+            pass
+        # Hide search input, restore player UI
         self._search_input.hide()
         self._search_input.clear()
-
-        # Restore art and text
         self.art_label.show()
         self._text_container.show()
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key_Escape and self._search_input.isVisible():
+        if event.key() == Qt.Key_Escape and self._search_mode:
             self._exit_search_mode()
             return
         super().keyPressEvent(event)
@@ -422,10 +468,47 @@ class PlayerWidget(QWidget):
     def _on_search_popup_closed(self):
         """When the search popup closes, exit search mode and collapse icon."""
         self._search_popup = None
-        if self._search_input.isVisible():
+        if self._search_mode:
             self._exit_search_mode()
         if not self._hovered:
             self._collapse_search()
+
+    # ── search loading spinner ─────────────────────────────────
+
+    def _on_search_started(self):
+        """Called when the search popup begins an API call."""
+        self._set_search_loading(True)
+
+    def _on_search_finished(self):
+        """Called when the search popup finishes an API call."""
+        self._set_search_loading(False)
+
+    def _set_search_loading(self, loading):
+        """Toggle the spinning search icon."""
+        self._search_loading = loading
+        if loading:
+            self._spinner_angle = 0
+            self._spinner_timer.start()
+        else:
+            self._spinner_timer.stop()
+            self.btn_search.setIcon(self._icon_search)
+
+    def _spin_search_icon(self):
+        """Rotate the loading icon to create a spinner effect."""
+        self._spinner_angle = (self._spinner_angle + 8) % 360
+        size = ICON_SIZE * 4
+        renderer = QSvgRenderer(QByteArray(ICON_LOADING.encode()))
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        painter.translate(size / 2, size / 2)
+        painter.rotate(self._spinner_angle)
+        painter.translate(-size / 2, -size / 2)
+        renderer.render(painter)
+        painter.end()
+        self.btn_search.setIcon(QIcon(pixmap))
 
     # ── system tray ───────────────────────────────────────────
 
@@ -474,7 +557,7 @@ class PlayerWidget(QWidget):
 
     def _toggle_visibility(self):
         if self.isVisible():
-            if self._search_input.isVisible():
+            if self._search_mode:
                 self._exit_search_mode()
             self.hide()
         else:
@@ -494,7 +577,7 @@ class PlayerWidget(QWidget):
 
     def closeEvent(self, event):
         """X button (or close()) hides to tray instead of quitting."""
-        if self._search_input.isVisible():
+        if self._search_mode:
             self._exit_search_mode()
         event.ignore()
         self.hide()

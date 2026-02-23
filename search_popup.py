@@ -119,6 +119,8 @@ class SearchPopup(QWidget):
     """Frameless search popup that floats above the player widget."""
 
     closed = Signal()
+    search_started = Signal()
+    search_finished = Signal()
 
     def __init__(self, parent_widget, spotify_api, inline=False):
         super().__init__()
@@ -220,6 +222,7 @@ class SearchPopup(QWidget):
                 background: transparent;
                 width: 6px;
                 margin: 0;
+                border: none;
             }
             QScrollBar::handle:vertical {
                 background: rgba(255, 255, 255, 30);
@@ -228,6 +231,11 @@ class SearchPopup(QWidget):
             }
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
                 height: 0;
+                background: transparent;
+                border: none;
+            }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background: transparent;
             }
         """)
 
@@ -309,8 +317,10 @@ class SearchPopup(QWidget):
         self._worker.results_ready.connect(self._show_results)
         self._worker.error.connect(self._show_error)
         self._worker.start()
+        self.search_started.emit()
 
     def _show_results(self, results):
+        self.search_finished.emit()
         self._clear_results()
 
         if not results:
@@ -355,9 +365,11 @@ class SearchPopup(QWidget):
         self._worker = _SearchWorker(self._api, self._last_query, offset=self._track_offset)
         self._worker.more_ready.connect(self._append_results)
         self._worker.start()
+        self.search_started.emit()
 
     def _append_results(self, tracks):
         """Append more track results to the existing list."""
+        self.search_finished.emit()
         self._loading_more = False
         if not tracks:
             return
@@ -375,6 +387,7 @@ class SearchPopup(QWidget):
         self._resize_to_fit(self._result_count)
 
     def _show_error(self, message):
+        self.search_finished.emit()
         self._clear_results()
         self._status_label.setText(message)
         self._status_label.show()

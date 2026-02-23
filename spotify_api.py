@@ -207,7 +207,7 @@ class SpotifyAPI:
                 playlists.append({
                     "name": item.get("name", ""),
                     "uri": item.get("uri", ""),
-                    "track_count": item.get("tracks", {}).get("total", 0),
+                    "track_count": item.get("items", {}).get("total", 0) or item.get("tracks", {}).get("total", 0),
                     "image_url": images[-1]["url"] if images else None,
                     "owner": item.get("owner", {}).get("display_name", ""),
                 })
