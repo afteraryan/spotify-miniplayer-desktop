@@ -127,29 +127,45 @@ class SpotifyAPI:
         # This keeps the song playing but removes album tracks from the queue.
         # Playlists are left alone — their queue is what the user wants.
         if track_uri and context_uri and "album" in context_uri:
-            self._clear_album_queue(track_uri, token)
+            self._clear_album_queue(track_uri, context_uri, token)
 
         return True, None
 
 
-    def _clear_album_queue(self, track_uri, token):
-        """Replay the track without context to clear album queue.
+    def _clear_album_queue(self, track_uri, context_uri, token):
+        """Clear album-context tracks from the queue while preserving user-queued songs.
 
-        Waits briefly for the play command to settle, fetches current position,
-        then replays at that position with no context_uri.
+        1. Wait for play command to settle
+        2. Fetch the current queue
+        3. Separate user-queued songs (different album) from album-context songs
+        4. Replay without context (clears entire queue)
+        5. Re-add the user-queued songs
         """
         try:
             time.sleep(0.5)
 
-            # Get current playback position
+            # Get current queue and playback position
+            user_songs = []
             progress = 0
+            try:
+                queue_data = _api_get("/me/player/queue", token)
+                # Extract the album URI to identify album-context tracks
+                album_uri = context_uri  # e.g. "spotify:album:xxx"
+                for item in queue_data.get("queue", []):
+                    item_album = item.get("album", {}).get("uri", "")
+                    if item_album != album_uri:
+                        # This track is NOT from the album context — user queued it
+                        user_songs.append(item["uri"])
+            except Exception as e:
+                print(f"[api] Queue fetch failed: {e}")
+
             try:
                 state = _api_get("/me/player", token)
                 progress = state.get("progress_ms", 0)
             except Exception:
                 pass
 
-            # Replay without context at the same position
+            # Replay without context at the same position (clears all queue)
             payload = {"uris": [track_uri], "position_ms": progress}
             req = urllib.request.Request(
                 f"{_BASE}/me/player/play",
@@ -161,7 +177,23 @@ class SpotifyAPI:
                 method="PUT",
             )
             urllib.request.urlopen(req)
-            print("[api] Album queue cleared — replayed without context")
+
+            # Re-add user-queued songs in order
+            for uri in user_songs:
+                try:
+                    add_req = urllib.request.Request(
+                        f"{_BASE}/me/player/queue?uri={uri}",
+                        headers={"Authorization": f"Bearer {token}"},
+                        method="POST",
+                    )
+                    urllib.request.urlopen(add_req)
+                except Exception:
+                    pass  # non-fatal, best effort
+
+            if user_songs:
+                print(f"[api] Album queue cleared, restored {len(user_songs)} user-queued songs")
+            else:
+                print("[api] Album queue cleared")
         except Exception as e:
             print(f"[api] Queue clear failed (non-fatal): {e}")
 
