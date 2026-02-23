@@ -83,9 +83,6 @@ class SpotifyAPI:
             # Play a context from the beginning (e.g. a playlist)
             payload = {"context_uri": context_uri}
         elif context_uri:
-            # First: wipe old queue by playing the track alone (no context)
-            _api_put_play({"uris": [track_uri]}, token)
-            # Then: immediately play with album context for fresh queue generation
             payload = {
                 "context_uri": context_uri,
                 "offset": {"uri": track_uri},
@@ -147,11 +144,21 @@ class SpotifyAPI:
                 return
 
             # Separate: album tracks vs auto-generated radio (different album URI)
+            album_count = 0
             radio_uris = []
             for item in queue:
                 item_album = item.get("album", {}).get("uri", "")
-                if item_album != context_uri:
+                if item_album == context_uri:
+                    album_count += 1
+                else:
                     radio_uris.append(item["uri"])
+
+            print(f"[api] Queue: {len(queue)} total, {album_count} album, {len(radio_uris)} radio")
+
+            if not radio_uris:
+                # No radio songs found — leave queue as-is rather than destroying it
+                print("[api] No radio songs in queue, skipping cleanup")
+                return
 
             # Get current playback position
             progress = 0
@@ -161,8 +168,8 @@ class SpotifyAPI:
             except Exception:
                 pass
 
-            # Replay with uris list: current track + radio songs
-            # This replaces the entire playback — no persistent user-queued tracks
+            # Replay: current track continues at same position, radio songs as queue
+            # Using uris list (not POST /queue) so next search replaces cleanly
             uris = [track_uri] + radio_uris
             _api_put_play({"uris": uris, "position_ms": progress}, token)
             print(f"[api] Replaced album queue with {len(radio_uris)} radio songs")
