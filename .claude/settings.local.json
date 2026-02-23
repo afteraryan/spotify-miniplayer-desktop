@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:lib.rs)",
+      "WebFetch(domain:microsoft.github.io)",
+      "WebFetch(domain:pypi.org)",
+      "WebFetch(domain:v2.tauri.app)",
+      "WebFetch(domain:medium.com)",
+      "Bash(pip --version:*)",
+      "Bash(findstr:*)",
+      "WebFetch(domain:deepwiki.com)",
+      "WebFetch(domain:winmundo.com)",
+      "WebFetch(domain:doc.qt.io)",
+      "Bash(pip install:*)",
+      "Bash(python:*)",
+      "Bash(taskkill:*)",
+      "Bash(tasklist:*)",
+      "Bash(powershell -Command:*)",
+      "WebFetch(domain:devblogs.microsoft.com)",
+      "WebFetch(domain:gamedev.net)",
+      "Bash(dir:*)"
+    ]
+  }
+}

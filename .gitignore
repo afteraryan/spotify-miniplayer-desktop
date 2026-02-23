@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Runtime state (user-specific)
+config.json
+
+# OAuth tokens (SECURITY CRITICAL — never commit)
+tokens.json
+
+# Debug artifacts
+debug.log
+nul
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
