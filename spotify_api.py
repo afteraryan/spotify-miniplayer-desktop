@@ -5,6 +5,8 @@ Thin wrapper around the Spotify Web API endpoints we need:
 """
 
 import json
+import threading
+import time
 import urllib.request
 import urllib.error
 from urllib.parse import urlencode
@@ -121,7 +123,93 @@ class SpotifyAPI:
             print(f"[api] Play failed: {e}")
             return False, "Network error"
 
+        # For album context: clean up album tracks in background, keep auto-generated queue
+        if track_uri and context_uri and "album" in context_uri:
+            t = threading.Thread(
+                target=self._replace_album_queue_with_radio,
+                args=(track_uri, context_uri, token),
+                daemon=True,
+            )
+            t.start()
+
         return True, None
+
+    def _replace_album_queue_with_radio(self, track_uri, context_uri, token):
+        """Background: wait for Spotify to populate the queue, then swap album
+        tracks for the auto-generated radio songs.
+
+        1. Wait for queue to populate (including auto-generated songs)
+        2. Fetch queue, separate album tracks from auto-generated ones
+        3. Replay without context (clears everything)
+        4. Re-add auto-generated songs
+        """
+        try:
+            # Wait for Spotify to populate the full queue including radio songs
+            time.sleep(3)
+
+            # Fetch the current queue
+            try:
+                queue_data = _api_get("/me/player/queue", token)
+            except Exception as e:
+                print(f"[api] Queue fetch failed: {e}")
+                return
+
+            queue = queue_data.get("queue", [])
+            if not queue:
+                return
+
+            # Separate: album tracks vs auto-generated (different album URI)
+            radio_songs = []
+            for item in queue:
+                item_album = item.get("album", {}).get("uri", "")
+                if item_album != context_uri:
+                    radio_songs.append(item["uri"])
+
+            if not radio_songs:
+                # No auto-generated songs found yet — don't clear, leave as-is
+                print("[api] No radio songs in queue yet, skipping cleanup")
+                return
+
+            # Get current playback position
+            progress = 0
+            try:
+                state = _api_get("/me/player", token)
+                progress = state.get("progress_ms", 0)
+            except Exception:
+                pass
+
+            # Replay without context (clears album queue)
+            payload = {"uris": [track_uri], "position_ms": progress}
+            req = urllib.request.Request(
+                f"{_BASE}/me/player/play",
+                data=json.dumps(payload).encode(),
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                },
+                method="PUT",
+            )
+            urllib.request.urlopen(req)
+
+            # Re-add radio songs sequentially (order matters)
+            added = 0
+            for uri in radio_songs:
+                try:
+                    add_req = urllib.request.Request(
+                        f"{_BASE}/me/player/queue?uri={uri}",
+                        headers={"Authorization": f"Bearer {token}"},
+                        method="POST",
+                    )
+                    urllib.request.urlopen(add_req)
+                    added += 1
+                    time.sleep(0.1)  # small delay to preserve order
+                except Exception:
+                    pass
+
+            print(f"[api] Replaced album queue with {added} radio songs")
+
+        except Exception as e:
+            print(f"[api] Queue cleanup failed (non-fatal): {e}")
 
     def get_my_playlists(self, query=None):
         """
