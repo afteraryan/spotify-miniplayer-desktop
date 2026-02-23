@@ -5,6 +5,7 @@ Thin wrapper around the Spotify Web API endpoints we need:
 """
 
 import json
+import time
 import urllib.request
 import urllib.error
 from urllib.parse import urlencode
@@ -19,7 +20,7 @@ class SpotifyAPI:
         self.auth = auth
         self._playlist_cache = None
 
-    def search_tracks(self, query, limit=8):
+    def search_tracks(self, query, limit=8, offset=0):
         """
         Search for tracks by name/artist.
 
@@ -35,6 +36,7 @@ class SpotifyAPI:
             "q": query,
             "type": "track",
             "limit": limit,
+            "offset": offset,
         })
 
         try:
@@ -101,7 +103,7 @@ class SpotifyAPI:
 
         try:
             with urllib.request.urlopen(req) as resp:
-                return True, None
+                pass
         except urllib.error.HTTPError as e:
             if e.code == 404:
                 return False, "No active Spotify device — open Spotify first"
@@ -109,17 +111,59 @@ class SpotifyAPI:
                 return False, "Spotify Premium is required"
             if e.code == 401:
                 return False, "Session expired — please log in again"
-            body = ""
+            err_body = ""
             try:
-                body = e.read().decode()
+                err_body = e.read().decode()
             except Exception:
                 pass
-            print(f"[api] Play failed: HTTP {e.code} — {body}")
+            print(f"[api] Play failed: HTTP {e.code} — {err_body}")
             return False, f"Playback error (HTTP {e.code})"
         except Exception as e:
             print(f"[api] Play failed: {e}")
             return False, "Network error"
 
+        # If we played a track within an album context, clear the album queue
+        # by replaying the same track without context after a short delay.
+        # This keeps the song playing but removes album tracks from the queue.
+        # Playlists are left alone — their queue is what the user wants.
+        if track_uri and context_uri and "album" in context_uri:
+            self._clear_album_queue(track_uri, token)
+
+        return True, None
+
+
+    def _clear_album_queue(self, track_uri, token):
+        """Replay the track without context to clear album queue.
+
+        Waits briefly for the play command to settle, fetches current position,
+        then replays at that position with no context_uri.
+        """
+        try:
+            time.sleep(0.5)
+
+            # Get current playback position
+            progress = 0
+            try:
+                state = _api_get("/me/player", token)
+                progress = state.get("progress_ms", 0)
+            except Exception:
+                pass
+
+            # Replay without context at the same position
+            payload = {"uris": [track_uri], "position_ms": progress}
+            req = urllib.request.Request(
+                f"{_BASE}/me/player/play",
+                data=json.dumps(payload).encode(),
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                },
+                method="PUT",
+            )
+            urllib.request.urlopen(req)
+            print("[api] Album queue cleared — replayed without context")
+        except Exception as e:
+            print(f"[api] Queue clear failed (non-fatal): {e}")
 
     def get_my_playlists(self, query=None):
         """
@@ -128,7 +172,11 @@ class SpotifyAPI:
         Returns a list of dicts: [{"name", "uri", "track_count", "image_url", "owner"}, ...]
         """
         if self._playlist_cache is None:
-            self._playlist_cache = self._fetch_playlists()
+            result = self._fetch_playlists()
+            if result:  # only cache non-empty results (403 returns [])
+                self._playlist_cache = result
+            else:
+                return []
 
         if not query:
             return self._playlist_cache

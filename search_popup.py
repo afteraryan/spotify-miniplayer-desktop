@@ -3,6 +3,9 @@ Search popup — appears above the taskbar widget.
 Type to search, click a result to play it.
 """
 
+import ctypes
+import ctypes.wintypes as wintypes
+
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QScrollArea, QFrame,
@@ -15,25 +18,63 @@ from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 
 from styles import (
-    FONT_FAMILY, TEXT_COLOR, SUBTEXT_COLOR,
-    ICON_SEARCH, ICON_CLOSE, SEARCH_POPUP_WIDTH, SEARCH_POPUP_BG,
+    FONT_FAMILY, TEXT_COLOR, SUBTEXT_COLOR, BG_COLOR,
+    ICON_SEARCH, ICON_CLOSE, SEARCH_POPUP_WIDTH,
     SEARCH_RESULT_HEIGHT, SEARCH_ART_SIZE,
 )
+
+
+# -- Windows 11 acrylic blur ------------------------------------------------
+
+class _ACCENT_POLICY(ctypes.Structure):
+    _fields_ = [
+        ("AccentState", ctypes.c_int),
+        ("AccentFlags", ctypes.c_int),
+        ("GradientColor", ctypes.c_uint),
+        ("AnimationId", ctypes.c_int),
+    ]
+
+class _WINCOMPATTRDATA(ctypes.Structure):
+    _fields_ = [
+        ("Attribute", ctypes.c_int),
+        ("Data", ctypes.POINTER(_ACCENT_POLICY)),
+        ("SizeOfData", ctypes.c_size_t),
+    ]
+
+def _enable_blur(hwnd, color_abgr=0xC0262626):
+    """Enable acrylic blur-behind on a window (Windows 10 1803+ / Windows 11)."""
+    accent = _ACCENT_POLICY()
+    accent.AccentState = 4  # ACCENT_ENABLE_ACRYLICBLURBEHIND
+    accent.AccentFlags = 2
+    accent.GradientColor = color_abgr
+    data = _WINCOMPATTRDATA()
+    data.Attribute = 19  # WCA_ACCENT_POLICY
+    data.Data = ctypes.pointer(accent)
+    data.SizeOfData = ctypes.sizeof(accent)
+    ctypes.windll.user32.SetWindowCompositionAttribute(hwnd, ctypes.byref(data))
 
 
 # -- search worker (runs API call off the main thread) -------------------
 
 class _SearchWorker(QThread):
     results_ready = Signal(list)
+    more_ready = Signal(list)   # for "load more" appends
     error = Signal(str)
 
-    def __init__(self, api, query):
+    def __init__(self, api, query, offset=0):
         super().__init__()
         self.api = api
         self.query = query
+        self.offset = offset
 
     def run(self):
-        tracks = self.api.search_tracks(self.query)
+        tracks = self.api.search_tracks(self.query, offset=self.offset)
+
+        if self.offset > 0:
+            # Load-more request — just emit tracks, no playlists
+            self.more_ready.emit(tracks or [])
+            return
+
         playlists = self.api.get_my_playlists(self.query) or []
 
         if tracks is None and not playlists:
@@ -87,6 +128,10 @@ class SearchPopup(QWidget):
         self._worker = None
         self._play_worker = None
         self._net = QNetworkAccessManager(self)
+        self._last_query = ""
+        self._track_offset = 0    # for pagination
+        self._loading_more = False
+        self._result_count = 0
 
         self.setWindowFlags(
             Qt.FramelessWindowHint
@@ -114,8 +159,8 @@ class SearchPopup(QWidget):
 
     def _build_ui(self):
         self._main_layout = QVBoxLayout(self)
-        self._main_layout.setContentsMargins(12, 12, 12, 12)
-        self._main_layout.setSpacing(8)
+        self._main_layout.setContentsMargins(0, 4, 0, 4)
+        self._main_layout.setSpacing(0)
 
         if not self._inline:
             # Header row: search input + close button (standalone mode only)
@@ -187,11 +232,13 @@ class SearchPopup(QWidget):
         """)
 
         self._results_container = QWidget()
+        self._results_container.setStyleSheet("background: transparent;")
         self._results_layout = QVBoxLayout(self._results_container)
         self._results_layout.setContentsMargins(0, 0, 0, 0)
-        self._results_layout.setSpacing(2)
+        self._results_layout.setSpacing(0)
         self._results_layout.addStretch()
         self._scroll.setWidget(self._results_container)
+        self._scroll.verticalScrollBar().valueChanged.connect(self._on_scroll)
         self._scroll.hide()
         self._main_layout.addWidget(self._scroll)
 
@@ -246,6 +293,10 @@ class SearchPopup(QWidget):
             self._clear_results()
             return
 
+        self._last_query = query
+        self._track_offset = 0
+        self._result_count = 0
+
         # Show loading state
         self._status_label.setText("Searching...")
         self._status_label.show()
@@ -273,6 +324,11 @@ class SearchPopup(QWidget):
         self._status_label.hide()
         self._scroll.show()
 
+        # Count only track results for pagination offset
+        track_count = sum(1 for r in results if r.get("_type") != "playlist")
+        self._track_offset = track_count
+        self._result_count = len(results)
+
         for track in results:
             item = _ResultItem(track, self._net)
             item.clicked.connect(self._play_track)
@@ -283,6 +339,40 @@ class SearchPopup(QWidget):
         if not self.isVisible():
             self.show()
         self._resize_to_fit(len(results))
+
+    def _on_scroll(self, value):
+        """Load more results when scrolled to the bottom."""
+        sb = self._scroll.verticalScrollBar()
+        if value >= sb.maximum() - 5 and not self._loading_more and self._last_query:
+            self._load_more()
+
+    def _load_more(self):
+        """Fetch the next page of track results."""
+        self._loading_more = True
+        if self._worker and self._worker.isRunning():
+            return
+
+        self._worker = _SearchWorker(self._api, self._last_query, offset=self._track_offset)
+        self._worker.more_ready.connect(self._append_results)
+        self._worker.start()
+
+    def _append_results(self, tracks):
+        """Append more track results to the existing list."""
+        self._loading_more = False
+        if not tracks:
+            return
+
+        self._track_offset += len(tracks)
+        self._result_count += len(tracks)
+
+        for track in tracks:
+            item = _ResultItem(track, self._net)
+            item.clicked.connect(self._play_track)
+            self._results_layout.insertWidget(
+                self._results_layout.count() - 1, item
+            )
+
+        self._resize_to_fit(self._result_count)
 
     def _show_error(self, message):
         self._clear_results()
@@ -351,19 +441,24 @@ class SearchPopup(QWidget):
 
     # -- painting --------------------------------------------------------
 
+    def showEvent(self, event):
+        """Enable acrylic blur on first show."""
+        super().showEvent(event)
+        if not getattr(self, '_blur_enabled', False):
+            self._blur_enabled = True
+            try:
+                # ABGR: alpha=0xC0(192), RGB=262626
+                _enable_blur(int(self.winId()), 0xC0262626)
+            except Exception:
+                pass  # fallback to solid bg if blur unavailable
+
     def paintEvent(self, event):
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-
-        rect = self.rect().adjusted(1, 1, -1, -1)
-        path = QPainterPath()
-        path.addRoundedRect(float(rect.x()), float(rect.y()),
-                            float(rect.width()), float(rect.height()), 10, 10)
-
-        # Background
-        p.setBrush(QColor(*SEARCH_POPUP_BG))
-        p.setPen(QColor(80, 80, 80, 80))
-        p.drawPath(path)
+        p.setPen(Qt.NoPen)
+        # Transparent — the acrylic blur provides the background.
+        # Draw a subtle fallback tint in case blur isn't available.
+        p.setBrush(QColor(38, 38, 38, 60))
+        p.drawRect(self.rect())
 
     # -- helpers ---------------------------------------------------------
 
@@ -482,12 +577,9 @@ class _ResultItem(QWidget):
     def paintEvent(self, event):
         if self._hovered:
             p = QPainter(self)
-            p.setRenderHint(QPainter.Antialiasing)
             p.setBrush(QColor(255, 255, 255, 15))
             p.setPen(Qt.NoPen)
-            path = QPainterPath()
-            path.addRoundedRect(0, 0, self.width(), self.height(), 6, 6)
-            p.drawPath(path)
+            p.drawRect(0, 0, self.width(), self.height())
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:

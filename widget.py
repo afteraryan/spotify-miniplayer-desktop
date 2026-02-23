@@ -348,16 +348,34 @@ class PlayerWidget(QWidget):
             if self._search_popup else None
         )
 
+        # Close search when user clicks anywhere else (focus leaves widget + popup)
+        QApplication.instance().focusChanged.connect(self._on_focus_changed)
+
     def _on_inline_search_text(self, text):
         """Forward keystrokes from inline input to the search popup."""
         if self._search_popup:
             self._search_popup.search_text(text)
+
+    def _on_focus_changed(self, old, new):
+        """Close search mode when focus leaves the widget and popup."""
+        if not self._search_input.isVisible():
+            return
+        # If focus went to our search input or the popup, keep search open
+        if new and (new is self._search_input or
+                    (self._search_popup and self._search_popup.isAncestorOf(new))):
+            return
+        # Focus left entirely — close search
+        self._exit_search_mode()
 
     def _exit_search_mode(self):
         """Restore the widget to player mode."""
         # Disconnect inline input signals
         try:
             self._search_input.textChanged.disconnect(self._on_inline_search_text)
+        except RuntimeError:
+            pass
+        try:
+            QApplication.instance().focusChanged.disconnect(self._on_focus_changed)
         except RuntimeError:
             pass
 
@@ -426,6 +444,7 @@ class PlayerWidget(QWidget):
         menu.addAction(self._autostart_action)
 
         menu.addSeparator()
+        menu.addAction("Relaunch", self._relaunch)
         menu.addAction("Quit", QApplication.quit)
 
         self._tray.setContextMenu(menu)
@@ -455,16 +474,28 @@ class PlayerWidget(QWidget):
 
     def _toggle_visibility(self):
         if self.isVisible():
+            if self._search_input.isVisible():
+                self._exit_search_mode()
             self.hide()
         else:
             self.show()
             self._ensure_on_top()
+
+    def _relaunch(self):
+        """Restart the application."""
+        QApplication.quit()
+        subprocess.Popen(
+            [sys.executable] + sys.argv,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
 
     def _toggle_autostart(self, checked):
         _set_autostart(checked)
 
     def closeEvent(self, event):
         """X button (or close()) hides to tray instead of quitting."""
+        if self._search_input.isVisible():
+            self._exit_search_mode()
         event.ignore()
         self.hide()
 
