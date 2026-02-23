@@ -14,10 +14,13 @@ import subprocess
 import winreg
 
 from PySide6.QtWidgets import (
-    QWidget, QHBoxLayout, QVBoxLayout, QLabel, QPushButton,
+    QWidget, QHBoxLayout, QVBoxLayout, QLabel, QPushButton, QLineEdit,
     QApplication, QSystemTrayIcon, QMenu,
 )
-from PySide6.QtCore import Qt, QTimer, QSize, QByteArray, QPoint
+from PySide6.QtCore import (
+    Qt, QTimer, QSize, QByteArray, QPoint,
+    QPropertyAnimation, QEasingCurve,
+)
 from PySide6.QtGui import (
     QPainter, QPixmap, QColor, QIcon, QPainterPath, QFont, QPolygon, QAction,
 )
@@ -26,7 +29,7 @@ from PySide6.QtSvg import QSvgRenderer
 from styles import (
     WIDGET_WIDTH, WIDGET_HEIGHT, CORNER_RADIUS, ART_SIZE,
     BUTTON_SIZE, ICON_SIZE, CLOSE_SIZE, CLOSE_ICON_SIZE,
-    BG_COLOR, BORDER_COLOR,
+    BG_COLOR, BORDER_COLOR, TEXT_COLOR,
     FONT_FAMILY, TITLE_SIZE, ARTIST_SIZE,
     PADDING, SPACING,
     ICON_PREV, ICON_PLAY, ICON_PAUSE, ICON_NEXT, ICON_CLOSE, ICON_SEARCH,
@@ -120,6 +123,7 @@ class PlayerWidget(QWidget):
         self._seeking = False       # True while scrubbing the progress bar
         self._hovered = False       # background visible only on hover
         self._hidden_for_fullscreen = False  # True while hiding for a fullscreen app
+        self._search_expanded = False  # True while search icon is visible
 
         # Pre-build the two toggle icons
         self._icon_play = svg_to_icon(ICON_PLAY, ICON_SIZE)
@@ -135,6 +139,7 @@ class PlayerWidget(QWidget):
 
         # Build the visual layout
         self._build_ui()
+        self._setup_search_animations()
 
         # Position on the taskbar
         self._position_on_taskbar()
@@ -165,6 +170,14 @@ class PlayerWidget(QWidget):
         root.setContentsMargins(PADDING, PADDING, PADDING, PADDING)
         root.setSpacing(SPACING)
 
+        # Search button (hidden by default, slides in from left on hover)
+        self.btn_search = self._make_btn(
+            ICON_SEARCH, BUTTON_SIZE, ICON_SIZE, BUTTON_STYLE, self._toggle_search
+        )
+        self.btn_search.setMinimumWidth(0)
+        self.btn_search.setMaximumWidth(0)
+        root.addWidget(self.btn_search)
+
         # Album art
         self.art_label = QLabel()
         self.art_label.setFixedSize(ART_SIZE, ART_SIZE)
@@ -174,8 +187,10 @@ class PlayerWidget(QWidget):
         )
         root.addWidget(self.art_label)
 
-        # Song title + artist (stacked vertically)
-        text_col = QVBoxLayout()
+        # Song title + artist (stacked vertically, in a container for easy hide/show)
+        self._text_container = QWidget()
+        self._text_container.setStyleSheet("background: transparent;")
+        text_col = QVBoxLayout(self._text_container)
         text_col.setSpacing(1)
         text_col.setContentsMargins(2, 0, 0, 0)
 
@@ -191,13 +206,23 @@ class PlayerWidget(QWidget):
         text_col.addWidget(self.title_label)
         text_col.addWidget(self.artist_label)
         text_col.addStretch()
-        root.addLayout(text_col, 1)
+        root.addWidget(self._text_container, 1)
 
-        # Search button
-        self.btn_search = self._make_btn(
-            ICON_SEARCH, BUTTON_SIZE, ICON_SIZE, BUTTON_STYLE, self._toggle_search
-        )
-        root.addWidget(self.btn_search)
+        # Inline search input (hidden by default — replaces art/text when active)
+        self._search_input = QLineEdit()
+        self._search_input.setPlaceholderText("Search...")
+        self._search_input.setFont(self._make_font(TITLE_SIZE))
+        self._search_input.setStyleSheet(f"""
+            QLineEdit {{
+                background: transparent;
+                border: none;
+                color: {TEXT_COLOR};
+                padding: 2px 4px;
+                selection-background-color: #1ED760;
+            }}
+        """)
+        self._search_input.hide()
+        root.addWidget(self._search_input, 1)
 
         # Playback buttons
         self.btn_prev = self._make_btn(
@@ -231,6 +256,41 @@ class PlayerWidget(QWidget):
             font.setWeight(QFont.DemiBold)
         return font
 
+    # ── search icon animation ──────────────────────────────────
+
+    def _setup_search_animations(self):
+        """Create the expand/collapse animation for the search icon."""
+        # Only animate the search button's maxWidth.
+        # The widget stays 310px — the text column (stretch) shrinks to make room.
+        self._anim_btn = QPropertyAnimation(self.btn_search, b"maximumWidth")
+        self._anim_btn.setDuration(200)
+        self._anim_btn.setEasingCurve(QEasingCurve.InOutCubic)
+
+    def _expand_search(self):
+        """Slide the search icon in from the left, pushing art/text right."""
+        if self._search_expanded:
+            return
+        self._search_expanded = True
+
+        self._anim_btn.stop()
+        self._anim_btn.setStartValue(self.btn_search.maximumWidth())
+        self._anim_btn.setEndValue(BUTTON_SIZE)
+        self._anim_btn.start()
+
+    def _collapse_search(self):
+        """Slide the search icon out — unless search popup is open."""
+        if not self._search_expanded:
+            return
+        # Keep expanded while search popup is visible
+        if self._search_popup and self._search_popup.isVisible():
+            return
+        self._search_expanded = False
+
+        self._anim_btn.stop()
+        self._anim_btn.setStartValue(self.btn_search.maximumWidth())
+        self._anim_btn.setEndValue(0)
+        self._anim_btn.start()
+
     # ── play/pause with Spotify launch ────────────────────────
 
     def _on_play_pause(self):
@@ -244,11 +304,9 @@ class PlayerWidget(QWidget):
     # ── search ───────────────────────────────────────────────
 
     def _toggle_search(self):
-        """Open/close the search popup. Triggers login on first use."""
-        # Close if already open
-        if self._search_popup and self._search_popup.isVisible():
-            self._search_popup.close()
-            self._search_popup = None
+        """Switch between player mode and search mode."""
+        if self._search_input.isVisible():
+            self._exit_search_mode()
             return
 
         # Check if client ID is configured
@@ -266,7 +324,60 @@ class PlayerWidget(QWidget):
             self._start_login()
             return
 
-        self._open_search_popup()
+        self._enter_search_mode()
+
+    def _enter_search_mode(self):
+        """Transform the widget into a search box (player controls stay visible)."""
+        # Hide only art and text — playback buttons stay
+        self.art_label.hide()
+        self._text_container.hide()
+
+        # Show search input and focus it
+        self._search_input.clear()
+        self._search_input.show()
+        self._search_input.setFocus()
+
+        # Create the results popup but don't show it yet — it appears when results arrive
+        self._search_popup = SearchPopup(self, self._spotify_api, inline=True)
+        self._search_popup.closed.connect(self._on_search_popup_closed)
+
+        # Wire inline input → popup search
+        self._search_input.textChanged.connect(self._on_inline_search_text)
+        self._search_input.returnPressed.connect(
+            lambda: self._search_popup.search_text(self._search_input.text())
+            if self._search_popup else None
+        )
+
+    def _on_inline_search_text(self, text):
+        """Forward keystrokes from inline input to the search popup."""
+        if self._search_popup:
+            self._search_popup.search_text(text)
+
+    def _exit_search_mode(self):
+        """Restore the widget to player mode."""
+        # Disconnect inline input signals
+        try:
+            self._search_input.textChanged.disconnect(self._on_inline_search_text)
+        except RuntimeError:
+            pass
+
+        # Close popup if open
+        if self._search_popup and self._search_popup.isVisible():
+            self._search_popup.close()
+
+        # Hide search input
+        self._search_input.hide()
+        self._search_input.clear()
+
+        # Restore art and text
+        self.art_label.show()
+        self._text_container.show()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape and self._search_input.isVisible():
+            self._exit_search_mode()
+            return
+        super().keyPressEvent(event)
 
     def _start_login(self):
         """Run the OAuth login on a background thread so the UI doesn't freeze."""
@@ -288,12 +399,15 @@ class PlayerWidget(QWidget):
 
     def _on_login_done(self, success):
         if success:
-            self._open_search_popup()
+            self._enter_search_mode()
 
-    def _open_search_popup(self):
-        self._search_popup = SearchPopup(self, self._spotify_api)
-        self._search_popup.show()
-        self._search_popup.focus_search_input()
+    def _on_search_popup_closed(self):
+        """When the search popup closes, exit search mode and collapse icon."""
+        self._search_popup = None
+        if self._search_input.isVisible():
+            self._exit_search_mode()
+        if not self._hovered:
+            self._collapse_search()
 
     # ── system tray ───────────────────────────────────────────
 
@@ -354,15 +468,17 @@ class PlayerWidget(QWidget):
         event.ignore()
         self.hide()
 
-    # ── hover: transparent ↔ solid background ─────────────────
+    # ── hover: transparent ↔ solid background + search animation ──
 
     def enterEvent(self, event):
         self._hovered = True
+        self._expand_search()
         self.update()
 
     def leaveEvent(self, event):
         if not self._seeking:      # don't flicker while scrubbing
             self._hovered = False
+            self._collapse_search()
             self.update()
 
     # ── taskbar positioning ───────────────────────────────────

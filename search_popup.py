@@ -33,23 +33,42 @@ class _SearchWorker(QThread):
         self.query = query
 
     def run(self):
-        results = self.api.search_tracks(self.query)
-        if results is not None:
-            self.results_ready.emit(results)
-        else:
+        tracks = self.api.search_tracks(self.query)
+        playlists = self.api.get_my_playlists(self.query) or []
+
+        if tracks is None and not playlists:
             self.error.emit("Search failed")
+            return
+
+        # Normalize playlist data to match track result format
+        playlist_results = []
+        for p in playlists[:3]:  # max 3 playlists
+            playlist_results.append({
+                "name": p["name"],
+                "artists": f"Playlist \u2022 {p['track_count']} tracks",
+                "album": "",
+                "album_uri": "",
+                "album_art_url": p.get("image_url"),
+                "uri": p["uri"],
+                "_type": "playlist",
+            })
+
+        # Playlists first, then tracks
+        combined = playlist_results + (tracks or [])
+        self.results_ready.emit(combined)
 
 
 class _PlayWorker(QThread):
     finished = Signal(bool, str)  # success, error_message
 
-    def __init__(self, api, uri):
+    def __init__(self, api, uri, context_uri=None):
         super().__init__()
         self.api = api
         self.uri = uri
+        self.context_uri = context_uri
 
     def run(self):
-        ok, msg = self.api.play_track(self.uri)
+        ok, msg = self.api.play_track(self.uri, self.context_uri)
         self.finished.emit(ok, msg or "")
 
 
@@ -58,10 +77,13 @@ class _PlayWorker(QThread):
 class SearchPopup(QWidget):
     """Frameless search popup that floats above the player widget."""
 
-    def __init__(self, parent_widget, spotify_api):
+    closed = Signal()
+
+    def __init__(self, parent_widget, spotify_api, inline=False):
         super().__init__()
         self._parent_widget = parent_widget
         self._api = spotify_api
+        self._inline = inline  # True = no header, driven by external input
         self._worker = None
         self._play_worker = None
         self._net = QNetworkAccessManager(self)
@@ -75,7 +97,12 @@ class SearchPopup(QWidget):
         self.setFixedWidth(SEARCH_POPUP_WIDTH)
 
         self._build_ui()
-        self._position_above_parent()
+        if self._inline:
+            self.setFixedHeight(0)
+            self.hide()  # don't show until results arrive
+        else:
+            self.setFixedHeight(72)
+            self._position_above_parent()
 
         # Debounce timer: waits 400ms after last keystroke before searching
         self._debounce = QTimer(self)
@@ -90,50 +117,51 @@ class SearchPopup(QWidget):
         self._main_layout.setContentsMargins(12, 12, 12, 12)
         self._main_layout.setSpacing(8)
 
-        # Header row: search input + close button
-        header = QHBoxLayout()
-        header.setSpacing(6)
+        if not self._inline:
+            # Header row: search input + close button (standalone mode only)
+            header = QHBoxLayout()
+            header.setSpacing(6)
 
-        self._search_input = QLineEdit()
-        self._search_input.setPlaceholderText("Search for a song...")
-        self._search_input.setFont(QFont(FONT_FAMILY, 12))
-        self._search_input.setMinimumHeight(36)
-        self._search_input.setStyleSheet(f"""
-            QLineEdit {{
-                background: rgba(255, 255, 255, 10);
-                border: 1px solid rgba(255, 255, 255, 20);
-                border-radius: 6px;
-                color: {TEXT_COLOR};
-                padding: 6px 12px;
-                selection-background-color: #1ED760;
-            }}
-            QLineEdit:focus {{
-                border-color: #1ED760;
-            }}
-        """)
-        self._search_input.textChanged.connect(self._on_text_changed)
-        self._search_input.returnPressed.connect(self._do_search)
-        header.addWidget(self._search_input, 1)
+            self._search_input = QLineEdit()
+            self._search_input.setPlaceholderText("Search for a song...")
+            self._search_input.setFont(QFont(FONT_FAMILY, 12))
+            self._search_input.setMinimumHeight(36)
+            self._search_input.setStyleSheet(f"""
+                QLineEdit {{
+                    background: rgba(255, 255, 255, 10);
+                    border: 1px solid rgba(255, 255, 255, 20);
+                    border-radius: 6px;
+                    color: {TEXT_COLOR};
+                    padding: 6px 12px;
+                    selection-background-color: #1ED760;
+                }}
+                QLineEdit:focus {{
+                    border-color: #1ED760;
+                }}
+            """)
+            self._search_input.textChanged.connect(self._on_text_changed)
+            self._search_input.returnPressed.connect(self._do_search)
+            header.addWidget(self._search_input, 1)
 
-        close_btn = QPushButton()
-        close_btn.setFixedSize(28, 28)
-        close_btn.setCursor(Qt.PointingHandCursor)
-        close_btn.setIcon(self._svg_icon(ICON_CLOSE, 12))
-        close_btn.setIconSize(QSize(12, 12))
-        close_btn.setStyleSheet("""
-            QPushButton {
-                background: transparent;
-                border: none;
-                border-radius: 14px;
-            }
-            QPushButton:hover {
-                background: rgba(255, 255, 255, 15);
-            }
-        """)
-        close_btn.clicked.connect(self.close)
-        header.addWidget(close_btn)
+            close_btn = QPushButton()
+            close_btn.setFixedSize(28, 28)
+            close_btn.setCursor(Qt.PointingHandCursor)
+            close_btn.setIcon(self._svg_icon(ICON_CLOSE, 12))
+            close_btn.setIconSize(QSize(12, 12))
+            close_btn.setStyleSheet("""
+                QPushButton {
+                    background: transparent;
+                    border: none;
+                    border-radius: 14px;
+                }
+                QPushButton:hover {
+                    background: rgba(255, 255, 255, 15);
+                }
+            """)
+            close_btn.clicked.connect(self.close)
+            header.addWidget(close_btn)
 
-        self._main_layout.addLayout(header)
+            self._main_layout.addLayout(header)
 
         # Results area (scrollable)
         self._scroll = QScrollArea()
@@ -178,15 +206,15 @@ class SearchPopup(QWidget):
     # -- positioning -----------------------------------------------------
 
     def _position_above_parent(self):
-        """Place the popup centered above the parent widget."""
+        """Place the popup so its bottom edge sits just above the parent widget."""
         pw = self._parent_widget
         popup_x = pw.x() + (pw.width() - self.width()) // 2
-        popup_y = pw.y() - self.height() - 4
-        self.move(popup_x, popup_y)
+        popup_y = pw.y() - self.height() - 4  # 4px gap above the widget
+        self.move(popup_x, max(popup_y, 0))
 
     def _resize_to_fit(self, result_count):
         """Resize popup height based on number of results."""
-        header_h = 60  # input + margins
+        header_h = 0 if self._inline else 60
         status_h = 30 if self._status_label.isVisible() else 0
 
         if result_count > 0:
@@ -196,7 +224,11 @@ class SearchPopup(QWidget):
         else:
             total_h = header_h + status_h + 24
 
-        self.setFixedHeight(total_h)
+        if self._inline and total_h <= 24:
+            # Inline mode with no meaningful content — hide instead
+            self.hide()
+            return
+        self.setFixedHeight(max(total_h, 10))
         self._position_above_parent()
 
     # -- search logic ----------------------------------------------------
@@ -206,7 +238,10 @@ class SearchPopup(QWidget):
 
     def _do_search(self):
         self._debounce.stop()
-        query = self._search_input.text().strip()
+        if self._inline:
+            query = getattr(self, '_pending_query', '').strip()
+        else:
+            query = self._search_input.text().strip()
         if len(query) < 2:
             self._clear_results()
             return
@@ -230,6 +265,8 @@ class SearchPopup(QWidget):
         if not results:
             self._status_label.setText("No results found")
             self._status_label.show()
+            if not self.isVisible():
+                self.show()
             self._resize_to_fit(0)
             return
 
@@ -243,6 +280,8 @@ class SearchPopup(QWidget):
                 self._results_layout.count() - 1, item  # before the stretch
             )
 
+        if not self.isVisible():
+            self.show()
         self._resize_to_fit(len(results))
 
     def _show_error(self, message):
@@ -258,14 +297,20 @@ class SearchPopup(QWidget):
                 child.widget().deleteLater()
         self._scroll.hide()
         self._status_label.hide()
+        if self._inline:
+            self.hide()
 
     # -- playback --------------------------------------------------------
 
-    def _play_track(self, uri):
+    def _play_track(self, uri, context_uri=None):
         self._status_label.setText("Playing...")
         self._status_label.show()
 
-        self._play_worker = _PlayWorker(self._api, uri)
+        if uri.startswith("spotify:playlist:"):
+            # Playlist: play from beginning (uri IS the context)
+            self._play_worker = _PlayWorker(self._api, None, uri)
+        else:
+            self._play_worker = _PlayWorker(self._api, uri, context_uri)
         self._play_worker.finished.connect(self._on_play_finished)
         self._play_worker.start()
 
@@ -279,14 +324,24 @@ class SearchPopup(QWidget):
     # -- focus / keyboard ------------------------------------------------
 
     def focus_search_input(self):
-        self._search_input.setFocus()
+        if not self._inline:
+            self._search_input.setFocus()
         self.activateWindow()
+
+    def search_text(self, text):
+        """Called by the parent widget's inline input to trigger a search."""
+        self._pending_query = text
+        self._debounce.start()
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
             self.close()
             return
         super().keyPressEvent(event)
+
+    def closeEvent(self, event):
+        self.closed.emit()
+        super().closeEvent(event)
 
     def focusOutEvent(self, event):
         # Close when clicking outside, but not when a child widget has focus
@@ -330,11 +385,13 @@ class SearchPopup(QWidget):
 class _ResultItem(QWidget):
     """A single search result row with album art, title, and artist."""
 
-    clicked = Signal(str)  # emits track URI on click
+    clicked = Signal(str, str)  # emits (track_uri, album_uri) on click
 
     def __init__(self, track_data, network_manager):
         super().__init__()
         self._uri = track_data["uri"]
+        self._is_playlist = track_data.get("_type") == "playlist"
+        self._context_uri = "" if self._is_playlist else track_data.get("album_uri", "")
         self._hovered = False
         self.setCursor(Qt.PointingHandCursor)
         self.setFixedHeight(SEARCH_RESULT_HEIGHT)
@@ -357,9 +414,10 @@ class _ResultItem(QWidget):
         text_col.setSpacing(1)
         text_col.setContentsMargins(0, 0, 0, 0)
 
+        name_color = "#1ED760" if self._is_playlist else TEXT_COLOR
         name_label = QLabel(track_data["name"])
         name_label.setFont(QFont(FONT_FAMILY, 11))
-        name_label.setStyleSheet(f"color: {TEXT_COLOR}; background: transparent;")
+        name_label.setStyleSheet(f"color: {name_color}; background: transparent;")
         fm = name_label.fontMetrics()
         name_label.setText(fm.elidedText(track_data["name"], Qt.ElideRight, SEARCH_POPUP_WIDTH - 100))
         name_label.setToolTip(track_data["name"])
@@ -433,4 +491,4 @@ class _ResultItem(QWidget):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            self.clicked.emit(self._uri)
+            self.clicked.emit(self._uri, self._context_uri)

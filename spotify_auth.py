@@ -27,7 +27,7 @@ CLIENT_ID = "470aea4274784a7ca4430941765b8f30"
 # -----------------------------------------------------------------------
 
 REDIRECT_URI = "http://127.0.0.1:8888/callback"
-SCOPES = "user-modify-playback-state user-read-playback-state"
+SCOPES = "user-modify-playback-state user-read-playback-state playlist-read-private"
 
 _AUTH_URL = "https://accounts.spotify.com/authorize"
 _TOKEN_URL = "https://accounts.spotify.com/api/token"

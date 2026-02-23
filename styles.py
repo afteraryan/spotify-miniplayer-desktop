@@ -2,7 +2,8 @@
 # Compact layout — sized to sit ON the Windows 11 taskbar (48px)
 
 # ── Window ────────────────────────────────────────────────────
-WIDGET_WIDTH = 345
+WIDGET_WIDTH = 310
+WIDGET_WIDTH_EXPANDED = 345   # when search icon is visible (on hover)
 WIDGET_HEIGHT = 40          # fits inside the 48px taskbar with margin
 CORNER_RADIUS = 8
 

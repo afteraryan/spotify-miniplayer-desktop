@@ -116,7 +116,7 @@ pythonw launch.pyw
 
 ## Style Guide
 
-- Widget dimensions: 345×40px (fits inside 48px Windows 11 taskbar)
+- Widget dimensions: 310×40px default, expands to 345×40px on hover (search icon slides in)
 - Font: Segoe UI (11px title bold, 9px artist)
 - Colors: dark background (38,38,38,210), Spotify green (#1ED760) for progress bar
 - Icons: inline SVG strings in styles.py (no external assets)
