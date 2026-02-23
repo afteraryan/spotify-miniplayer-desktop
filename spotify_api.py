@@ -113,52 +113,23 @@ class SpotifyAPI:
             print(f"[api] Play failed: {e}")
             return False, "Network error"
 
-        # For album context: clean up album tracks in background, keep auto-generated queue
+        # For album context: clear album tracks in background after 3s
+        # Don't re-add anything — Spotify's autoplay generates fresh radio
         if track_uri and context_uri and "album" in context_uri:
             t = threading.Thread(
-                target=self._replace_album_queue_with_radio,
-                args=(track_uri, context_uri, token),
+                target=self._clear_album_queue,
+                args=(track_uri, token),
                 daemon=True,
             )
             t.start()
 
         return True, None
 
-    def _replace_album_queue_with_radio(self, track_uri, context_uri, token):
-        """Background: wait for Spotify to populate the queue, then swap album
-        tracks for the auto-generated radio songs.
-
-        1. Wait for queue to populate (including auto-generated songs)
-        2. Fetch queue, separate album tracks from auto-generated ones
-        3. Replay without context (clears everything)
-        4. Re-add auto-generated songs
-        """
+    def _clear_album_queue(self, track_uri, token):
+        """Background: wait for playback to settle, then replay without context
+        to clear album tracks. Spotify's autoplay generates fresh radio after."""
         try:
-            # Wait for Spotify to populate the full queue including radio songs
             time.sleep(3)
-
-            # Fetch the current queue
-            try:
-                queue_data = _api_get("/me/player/queue", token)
-            except Exception as e:
-                print(f"[api] Queue fetch failed: {e}")
-                return
-
-            queue = queue_data.get("queue", [])
-            if not queue:
-                return
-
-            # Separate: album tracks vs auto-generated (different album URI)
-            radio_songs = []
-            for item in queue:
-                item_album = item.get("album", {}).get("uri", "")
-                if item_album != context_uri:
-                    radio_songs.append(item["uri"])
-
-            if not radio_songs:
-                # No auto-generated songs found yet — don't clear, leave as-is
-                print("[api] No radio songs in queue yet, skipping cleanup")
-                return
 
             # Get current playback position
             progress = 0
@@ -168,25 +139,9 @@ class SpotifyAPI:
             except Exception:
                 pass
 
-            # Replay without context (clears album queue)
+            # Replay without context — clears album queue, autoplay handles the rest
             _api_put_play({"uris": [track_uri], "position_ms": progress}, token)
-
-            # Re-add radio songs sequentially (order matters)
-            added = 0
-            for uri in radio_songs:
-                try:
-                    add_req = urllib.request.Request(
-                        f"{_BASE}/me/player/queue?uri={uri}",
-                        headers={"Authorization": f"Bearer {token}"},
-                        method="POST",
-                    )
-                    urllib.request.urlopen(add_req)
-                    added += 1
-                    time.sleep(0.1)  # small delay to preserve order
-                except Exception:
-                    pass
-
-            print(f"[api] Replaced album queue with {added} radio songs")
+            print("[api] Album queue cleared")
 
         except Exception as e:
             print(f"[api] Queue cleanup failed (non-fatal): {e}")
