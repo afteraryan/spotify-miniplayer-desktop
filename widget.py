@@ -15,7 +15,7 @@ import winreg
 
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QLabel, QPushButton, QLineEdit,
-    QApplication, QSystemTrayIcon, QMenu,
+    QApplication, QSystemTrayIcon, QMenu, QStackedWidget,
 )
 from PySide6.QtCore import (
     Qt, QTimer, QSize, QByteArray, QPoint,
@@ -187,16 +187,26 @@ class PlayerWidget(QWidget):
         self.btn_search.setMaximumWidth(0)
         root.addWidget(self.btn_search)
 
-        # Album art
+        # Content area: stacked widget swaps between player view and search input.
+        # Same fixed space — playback buttons never move.
+        self._content_stack = QStackedWidget()
+        self._content_stack.setStyleSheet("background: transparent;")
+
+        # Page 0: player view (album art + title/artist)
+        self._player_page = QWidget()
+        self._player_page.setStyleSheet("background: transparent;")
+        player_row = QHBoxLayout(self._player_page)
+        player_row.setContentsMargins(0, 0, 0, 0)
+        player_row.setSpacing(SPACING)
+
         self.art_label = QLabel()
         self.art_label.setFixedSize(ART_SIZE, ART_SIZE)
         self.art_label.setAlignment(Qt.AlignCenter)
         self.art_label.setStyleSheet(
             "background: rgba(255,255,255,8); border-radius: 4px;"
         )
-        root.addWidget(self.art_label)
+        player_row.addWidget(self.art_label)
 
-        # Song title + artist (stacked vertically, in a container for easy hide/show)
         self._text_container = QWidget()
         self._text_container.setStyleSheet("background: transparent;")
         text_col = QVBoxLayout(self._text_container)
@@ -215,9 +225,11 @@ class PlayerWidget(QWidget):
         text_col.addWidget(self.title_label)
         text_col.addWidget(self.artist_label)
         text_col.addStretch()
-        root.addWidget(self._text_container, 1)
+        player_row.addWidget(self._text_container, 1)
 
-        # Inline search input (hidden by default — replaces art/text when active)
+        self._content_stack.addWidget(self._player_page)   # index 0
+
+        # Page 1: search input
         self._search_input = QLineEdit()
         self._search_input.setPlaceholderText("Search...")
         self._search_input.setFont(self._make_font(TITLE_SIZE))
@@ -230,8 +242,9 @@ class PlayerWidget(QWidget):
                 selection-background-color: #1ED760;
             }}
         """)
-        self._search_input.hide()
-        root.addWidget(self._search_input, 1)
+        self._content_stack.addWidget(self._search_input)  # index 1
+
+        root.addWidget(self._content_stack, 1)
 
         # Playback buttons
         self.btn_prev = self._make_btn(
@@ -268,16 +281,10 @@ class PlayerWidget(QWidget):
     # ── search icon animation ──────────────────────────────────
 
     def _setup_search_animations(self):
-        """Create animations for the search icon hover and search mode transitions."""
-        # Search button slide in/out on hover
+        """Create the expand/collapse animation for the search icon."""
         self._anim_btn = QPropertyAnimation(self.btn_search, b"maximumWidth")
         self._anim_btn.setDuration(200)
         self._anim_btn.setEasingCurve(QEasingCurve.InOutCubic)
-
-        # Search input expand/collapse for search mode transition
-        self._anim_search_width = QPropertyAnimation(self._search_input, b"maximumWidth")
-        self._anim_search_width.setDuration(200)
-        self._anim_search_width.setEasingCurve(QEasingCurve.OutCubic)
 
     def _expand_search(self):
         """Slide the search icon in from the left, pushing art/text right."""
@@ -340,24 +347,12 @@ class PlayerWidget(QWidget):
         self._enter_search_mode()
 
     def _enter_search_mode(self):
-        """Transform the widget into a search box with slide animation."""
+        """Transform the widget into a search box."""
         self._search_mode = True
 
-        # Hide art and text, show search input
-        self.art_label.hide()
-        self._text_container.hide()
-
+        # Swap to search page — same space, buttons don't move
         self._search_input.clear()
-        self._search_input.show()
-        self._search_input.setMinimumWidth(0)
-        self._search_input.setMaximumWidth(0)
-
-        # Animate search input expanding from 0 to fill available space
-        self._anim_search_width.stop()
-        self._anim_search_width.setStartValue(0)
-        self._anim_search_width.setEndValue(WIDGET_WIDTH)
-        self._anim_search_width.start()
-
+        self._content_stack.setCurrentIndex(1)
         self._search_input.setFocus()
 
         # Create the results popup but don't show it yet — it appears when results arrive
@@ -395,7 +390,7 @@ class PlayerWidget(QWidget):
         self._exit_search_mode()
 
     def _exit_search_mode(self):
-        """Restore the widget to player mode with slide animation."""
+        """Restore the widget to player mode."""
         if not self._search_mode:
             return
         self._search_mode = False
@@ -417,25 +412,9 @@ class PlayerWidget(QWidget):
         if self._search_popup and self._search_popup.isVisible():
             self._search_popup.close()
 
-        # Animate search input collapsing, then restore player UI
-        self._anim_search_width.stop()
-        self._anim_search_width.setStartValue(self._search_input.maximumWidth())
-        self._anim_search_width.setEndValue(0)
-        self._anim_search_width.finished.connect(self._on_search_collapse_done)
-        self._anim_search_width.start()
-
-    def _on_search_collapse_done(self):
-        """Called when the search input collapse animation finishes."""
-        # Disconnect so it doesn't fire again on next animation
-        try:
-            self._anim_search_width.finished.disconnect(self._on_search_collapse_done)
-        except RuntimeError:
-            pass
-        # Hide search input, restore player UI
-        self._search_input.hide()
+        # Swap back to player page
         self._search_input.clear()
-        self.art_label.show()
-        self._text_container.show()
+        self._content_stack.setCurrentIndex(0)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape and self._search_mode:
