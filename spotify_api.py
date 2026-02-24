@@ -94,7 +94,15 @@ class SpotifyAPI:
             _api_put_play(payload, token)
         except urllib.error.HTTPError as e:
             if e.code == 404:
-                return False, "No active Spotify device — open Spotify first"
+                # No active device — try to find one and retry
+                device_id = self._find_device(token)
+                if device_id:
+                    try:
+                        _api_put_play(payload, token, device_id=device_id)
+                    except Exception:
+                        return False, "No active Spotify device — open Spotify first"
+                else:
+                    return False, "No active Spotify device — open Spotify first"
             if e.code == 403:
                 return False, "Spotify Premium is required"
             if e.code == 401:
@@ -120,6 +128,22 @@ class SpotifyAPI:
             t.start()
 
         return True, None
+
+    def _find_device(self, token):
+        """Find an available Spotify device. Returns device_id or None."""
+        try:
+            data = _api_get("/me/player/devices", token)
+            for device in data.get("devices", []):
+                # Prefer the active device, fall back to any available one
+                if device.get("is_active"):
+                    return device["id"]
+            # No active device — just pick the first one
+            devices = data.get("devices", [])
+            if devices:
+                return devices[0]["id"]
+        except Exception as e:
+            print(f"[api] Device lookup failed: {e}")
+        return None
 
     def _replace_album_with_radio(self, track_uri, context_uri, token):
         """Background: wait for Spotify to populate the queue, then replace
@@ -242,10 +266,13 @@ def _api_get(path, token):
         return json.loads(resp.read())
 
 
-def _api_put_play(payload, token):
+def _api_put_play(payload, token, device_id=None):
     """PUT /me/player/play. Raises on HTTP error."""
+    url = f"{_BASE}/me/player/play"
+    if device_id:
+        url += f"?device_id={device_id}"
     req = urllib.request.Request(
-        f"{_BASE}/me/player/play",
+        url,
         data=json.dumps(payload).encode(),
         headers={
             "Authorization": f"Bearer {token}",
