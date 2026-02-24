@@ -96,24 +96,25 @@ class SpotifyAPI:
             if e.code == 404:
                 # No active device — try to find one and retry
                 device_id = self._find_device(token)
-                if device_id:
-                    try:
-                        _api_put_play(payload, token, device_id=device_id)
-                    except Exception:
-                        return False, "No active Spotify device — open Spotify first"
-                else:
+                if not device_id:
                     return False, "No active Spotify device — open Spotify first"
-            if e.code == 403:
+                try:
+                    _api_put_play(payload, token, device_id=device_id)
+                except Exception:
+                    return False, "No active Spotify device — open Spotify first"
+                # Retry succeeded — fall through to success path
+            elif e.code == 403:
                 return False, "Spotify Premium is required"
-            if e.code == 401:
+            elif e.code == 401:
                 return False, "Session expired — please log in again"
-            err_body = ""
-            try:
-                err_body = e.read().decode()
-            except Exception:
-                pass
-            print(f"[api] Play failed: HTTP {e.code} — {err_body}")
-            return False, f"Playback error (HTTP {e.code})"
+            else:
+                err_body = ""
+                try:
+                    err_body = e.read().decode()
+                except Exception:
+                    pass
+                print(f"[api] Play failed: HTTP {e.code} — {err_body}")
+                return False, f"Playback error (HTTP {e.code})"
         except Exception as e:
             print(f"[api] Play failed: {e}")
             return False, "Network error"
