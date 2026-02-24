@@ -130,17 +130,21 @@ class SpotifyAPI:
         return True, None
 
     def _find_device(self, token):
-        """Find an available Spotify device. Returns device_id or None."""
+        """Find a desktop Spotify device. Returns device_id or None."""
         try:
             data = _api_get("/me/player/devices", token)
-            for device in data.get("devices", []):
-                # Prefer the active device, fall back to any available one
-                if device.get("is_active"):
-                    return device["id"]
-            # No active device — just pick the first one
-            devices = data.get("devices", [])
-            if devices:
-                return devices[0]["id"]
+            # Only consider desktop devices — never play on phone/speaker
+            desktops = [
+                d for d in data.get("devices", [])
+                if d.get("type", "").lower() == "computer"
+            ]
+            # Prefer the active one
+            for d in desktops:
+                if d.get("is_active"):
+                    return d["id"]
+            # Fall back to first desktop device
+            if desktops:
+                return desktops[0]["id"]
         except Exception as e:
             print(f"[api] Device lookup failed: {e}")
         return None
