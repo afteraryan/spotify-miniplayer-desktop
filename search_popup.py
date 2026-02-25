@@ -129,6 +129,7 @@ class SearchPopup(QWidget):
         self._inline = inline  # True = no header, driven by external input
         self._worker = None
         self._play_worker = None
+        self._old_workers = []  # prevent GC of replaced threads still running
         self._net = QNetworkAccessManager(self)
         self._last_query = ""
         self._track_offset = 0    # for pagination
@@ -309,9 +310,8 @@ class SearchPopup(QWidget):
         self._status_label.setText("Searching...")
         self._status_label.show()
 
-        # Cancel previous search if still running
-        if self._worker and self._worker.isRunning():
-            self._worker.quit()
+        # Keep old worker alive until it finishes (prevents GC crash)
+        self._retire_worker(self._worker)
 
         self._worker = _SearchWorker(self._api, query)
         self._worker.results_ready.connect(self._show_results)
@@ -359,8 +359,7 @@ class SearchPopup(QWidget):
     def _load_more(self):
         """Fetch the next page of track results."""
         self._loading_more = True
-        if self._worker and self._worker.isRunning():
-            return
+        self._retire_worker(self._worker)
 
         self._worker = _SearchWorker(self._api, self._last_query, offset=self._track_offset)
         self._worker.more_ready.connect(self._append_results)
@@ -409,6 +408,8 @@ class SearchPopup(QWidget):
         self._status_label.setText("Playing...")
         self._status_label.show()
 
+        self._retire_worker(self._play_worker)
+
         if uri.startswith("spotify:playlist:"):
             # Playlist: play from beginning (uri IS the context)
             self._play_worker = _PlayWorker(self._api, None, uri)
@@ -442,7 +443,22 @@ class SearchPopup(QWidget):
             return
         super().keyPressEvent(event)
 
+    def _retire_worker(self, worker):
+        """Keep a replaced worker alive until it finishes, preventing GC crash."""
+        if worker is None:
+            return
+        if worker.isRunning():
+            self._old_workers.append(worker)
+            worker.finished.connect(lambda w=worker: (
+                self._old_workers.remove(w) if w in self._old_workers else None
+            ))
+
     def closeEvent(self, event):
+        # Wait for all threads to fully stop before destroying
+        all_workers = [self._worker, self._play_worker] + self._old_workers
+        for worker in all_workers:
+            if worker is not None and worker.isRunning():
+                worker.wait(15000)
         self.closed.emit()
         super().closeEvent(event)
 
@@ -553,16 +569,19 @@ class _ResultItem(QWidget):
             reply.finished.connect(lambda r=reply: self._on_art_loaded(r))
 
     def _on_art_loaded(self, reply):
-        if reply.error() == QNetworkReply.NoError:
-            pm = QPixmap()
-            pm.loadFromData(reply.readAll())
-            if not pm.isNull():
-                scaled = pm.scaled(
-                    SEARCH_ART_SIZE, SEARCH_ART_SIZE,
-                    Qt.KeepAspectRatioByExpanding,
-                    Qt.SmoothTransformation,
-                )
-                self._art_label.setPixmap(self._round_pixmap(scaled, 4))
+        try:
+            if reply.error() == QNetworkReply.NoError:
+                pm = QPixmap()
+                pm.loadFromData(reply.readAll())
+                if not pm.isNull():
+                    scaled = pm.scaled(
+                        SEARCH_ART_SIZE, SEARCH_ART_SIZE,
+                        Qt.KeepAspectRatioByExpanding,
+                        Qt.SmoothTransformation,
+                    )
+                    self._art_label.setPixmap(self._round_pixmap(scaled, 4))
+        except RuntimeError:
+            pass  # widget already deleted (search results cleared)
         reply.deleteLater()
 
     @staticmethod

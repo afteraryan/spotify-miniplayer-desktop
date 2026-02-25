@@ -94,8 +94,10 @@ class SpotifyAPI:
             _api_put_play(payload, token)
         except urllib.error.HTTPError as e:
             if e.code == 404:
-                # No active device — try to find one and retry
+                # No active device — try to find one, poll if Spotify is still starting
                 device_id = self._find_device(token)
+                if not device_id:
+                    device_id = self._wait_for_device(token, timeout=20)
                 if not device_id:
                     return False, "No active Spotify device — open Spotify first"
                 try:
@@ -130,13 +132,29 @@ class SpotifyAPI:
 
         return True, None
 
+    def _wait_for_device(self, token, timeout=20):
+        """Poll for a desktop Spotify device to appear (e.g. Spotify is still starting)."""
+        elapsed = 0
+        while elapsed < timeout:
+            time.sleep(2)
+            elapsed += 2
+            device_id = self._find_device(token)
+            if device_id:
+                print(f"[api] Device found after {elapsed}s", flush=True)
+                return device_id
+            print(f"[api] No device yet ({elapsed}s/{timeout}s)", flush=True)
+        print("[api] Device polling timed out", flush=True)
+        return None
+
     def _find_device(self, token):
         """Find a desktop Spotify device. Returns device_id or None."""
         try:
             data = _api_get("/me/player/devices", token)
+            devices = data.get("devices", [])
+            print(f"[api] Devices: {[(d.get('name'), d.get('type'), d.get('is_active')) for d in devices]}", flush=True)
             # Only consider desktop devices — never play on phone/speaker
             desktops = [
-                d for d in data.get("devices", [])
+                d for d in devices
                 if d.get("type", "").lower() == "computer"
             ]
             # Prefer the active one
@@ -147,7 +165,7 @@ class SpotifyAPI:
             if desktops:
                 return desktops[0]["id"]
         except Exception as e:
-            print(f"[api] Device lookup failed: {e}")
+            print(f"[api] Device lookup failed: {e}", flush=True)
         return None
 
     def _replace_album_with_radio(self, track_uri, context_uri, token):
