@@ -140,10 +140,7 @@ class SpotifyAPI:
             elapsed += 2
             device_id = self._find_device(token)
             if device_id:
-                print(f"[api] Device found after {elapsed}s", flush=True)
                 return device_id
-            print(f"[api] No device yet ({elapsed}s/{timeout}s)", flush=True)
-        print("[api] Device polling timed out", flush=True)
         return None
 
     def _find_device(self, token):
@@ -151,7 +148,6 @@ class SpotifyAPI:
         try:
             data = _api_get("/me/player/devices", token)
             devices = data.get("devices", [])
-            print(f"[api] Devices: {[(d.get('name'), d.get('type'), d.get('is_active')) for d in devices]}", flush=True)
             # Only consider desktop devices — never play on phone/speaker
             desktops = [
                 d for d in devices

@@ -127,6 +127,7 @@ class PlayerWidget(QWidget):
         self._search_mode = False      # True while in inline search mode
         self._search_loading = False   # True while a search API call is in-flight
         self._spinner_angle = 0        # rotation angle for loading spinner
+        self._spotify_active = False   # True when SMTC reports a Spotify session
 
         # Pre-build the two toggle icons
         self._icon_play = svg_to_icon(ICON_PLAY, ICON_SIZE)
@@ -288,7 +289,7 @@ class PlayerWidget(QWidget):
 
     def _expand_search(self):
         """Slide the search icon in from the left, pushing art/text right."""
-        if self._search_expanded:
+        if self._search_expanded or not self._spotify_active:
             return
         self._search_expanded = True
 
@@ -339,9 +340,6 @@ class PlayerWidget(QWidget):
             self._exit_search_mode()
             return
 
-        # Pre-launch Spotify so it's ready by the time the user picks a track
-        self._ensure_spotify_running()
-
         # Check if client ID is configured
         if not CLIENT_ID:
             from PySide6.QtWidgets import QMessageBox
@@ -358,27 +356,6 @@ class PlayerWidget(QWidget):
             return
 
         self._enter_search_mode()
-
-    def _ensure_spotify_running(self):
-        """Launch Spotify in the background if no active device exists."""
-        # Don't launch twice
-        if getattr(self, '_spotify_launching', False):
-            return
-        import threading
-        threading.Thread(target=self._check_device_and_launch, daemon=True).start()
-
-    def _check_device_and_launch(self):
-        """Background: check for a Spotify device, launch Spotify if none."""
-        try:
-            token = self._spotify_auth.get_access_token()
-            if token and not self._spotify_api._find_device(token):
-                self._launch_spotify()
-                self._spotify_launching = True
-                import time
-                time.sleep(10)
-                self._spotify_launching = False
-        except Exception:
-            pass
 
     def _enter_search_mode(self):
         """Transform the widget into a search box."""
@@ -413,9 +390,6 @@ class PlayerWidget(QWidget):
     def _on_focus_changed(self, old, new):
         """Close search mode when focus leaves the widget and popup."""
         if not self._search_mode:
-            return
-        # If Spotify is still launching (we started it), ignore focus changes
-        if getattr(self, '_spotify_launching', False):
             return
         # Don't close while a play is in progress (waiting for device, etc.)
         if (self._search_popup and self._search_popup._play_worker
@@ -829,6 +803,7 @@ class PlayerWidget(QWidget):
             return
 
         if info is None:
+            self._spotify_active = False
             if self._last_title is not None:
                 self.title_label.setText("No music playing")
                 self.title_label.setStyleSheet(NO_MUSIC_STYLE)
@@ -840,6 +815,8 @@ class PlayerWidget(QWidget):
                 self._duration = 0.0
                 self.update()
             return
+
+        self._spotify_active = True
 
         # Progress bar (updates every poll even if song hasn't changed)
         self._duration = info["duration"]
