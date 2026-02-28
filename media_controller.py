@@ -185,3 +185,12 @@ class MediaController:
             # SMTC expects position in 100-nanosecond ticks
             ticks = int(position_seconds * 10_000_000)
             await session.try_change_playback_position_async(ticks)
+
+    # ── cleanup ────────────────────────────────────────────────
+
+    def stop(self):
+        """Shut down the asyncio loop and wait for the worker thread to finish."""
+        if self._loop is not None and self._loop.is_running():
+            self._loop.call_soon_threadsafe(self._loop.stop)
+        if self._thread.is_alive():
+            self._thread.join(timeout=3)

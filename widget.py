@@ -23,6 +23,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QPainter, QPixmap, QColor, QIcon, QPainterPath, QFont, QPolygon, QAction,
+    QTransform,
 )
 from PySide6.QtSvg import QSvgRenderer
 
@@ -134,6 +135,17 @@ class PlayerWidget(QWidget):
         self._icon_pause = svg_to_icon(ICON_PAUSE, ICON_SIZE)
         self._icon_search = svg_to_icon(ICON_SEARCH, ICON_SIZE)
 
+        # Pre-render the loading spinner base pixmap (rotated cheaply each frame)
+        _lr_size = ICON_SIZE * 4
+        _lr_renderer = QSvgRenderer(QByteArray(ICON_LOADING.encode()))
+        self._spinner_base = QPixmap(_lr_size, _lr_size)
+        self._spinner_base.fill(Qt.transparent)
+        _lr_p = QPainter(self._spinner_base)
+        _lr_p.setRenderHint(QPainter.Antialiasing)
+        _lr_p.setRenderHint(QPainter.SmoothPixmapTransform)
+        _lr_renderer.render(_lr_p)
+        _lr_p.end()
+
         # Spinner timer (rotates the search icon while loading)
         self._spinner_timer = QTimer(self)
         self._spinner_timer.setInterval(30)
@@ -154,6 +166,9 @@ class PlayerWidget(QWidget):
         # Position on the taskbar
         self._position_on_taskbar()
 
+        # Re-position when screen geometry changes (resolution change, laptop wake, etc.)
+        QApplication.primaryScreen().geometryChanged.connect(self._position_on_taskbar)
+
         # System tray icon
         self._setup_tray()
 
@@ -172,6 +187,9 @@ class PlayerWidget(QWidget):
         self._raise_timer = QTimer(self)
         self._raise_timer.timeout.connect(self._ensure_on_top)
         self._raise_timer.start(250)
+
+        # Clean up resources on actual app quit (tray → Quit)
+        QApplication.instance().aboutToQuit.connect(self._on_app_quit)
 
     # ── UI construction ───────────────────────────────────────
 
@@ -488,21 +506,20 @@ class PlayerWidget(QWidget):
             self.btn_search.setIcon(self._icon_search)
 
     def _spin_search_icon(self):
-        """Rotate the loading icon to create a spinner effect."""
+        """Rotate the cached loading pixmap to create a spinner effect."""
         self._spinner_angle = (self._spinner_angle + 8) % 360
-        size = ICON_SIZE * 4
-        renderer = QSvgRenderer(QByteArray(ICON_LOADING.encode()))
-        pixmap = QPixmap(size, size)
-        pixmap.fill(Qt.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.setRenderHint(QPainter.SmoothPixmapTransform)
-        painter.translate(size / 2, size / 2)
-        painter.rotate(self._spinner_angle)
-        painter.translate(-size / 2, -size / 2)
-        renderer.render(painter)
-        painter.end()
-        self.btn_search.setIcon(QIcon(pixmap))
+        t = QTransform()
+        sz = self._spinner_base.width()
+        t.translate(sz / 2, sz / 2)
+        t.rotate(self._spinner_angle)
+        t.translate(-sz / 2, -sz / 2)
+        rotated = self._spinner_base.transformed(t, Qt.SmoothTransformation)
+        # transformed() can change size due to rotation; crop back to original
+        if rotated.size() != self._spinner_base.size():
+            cx = (rotated.width() - sz) // 2
+            cy = (rotated.height() - sz) // 2
+            rotated = rotated.copy(cx, cy, sz, sz)
+        self.btn_search.setIcon(QIcon(rotated))
 
     # ── system tray ───────────────────────────────────────────
 
@@ -555,6 +572,7 @@ class PlayerWidget(QWidget):
                 self._exit_search_mode()
             self.hide()
         else:
+            self._position_on_taskbar()  # recalculate in case screen changed
             self.show()
             self._ensure_on_top()
 
@@ -569,12 +587,55 @@ class PlayerWidget(QWidget):
     def _toggle_autostart(self, checked):
         _set_autostart(checked)
 
+    def _on_app_quit(self):
+        """Clean up all resources when the app is actually quitting."""
+        # Unhook the Windows foreground event hook
+        if getattr(self, '_winevent_hook', None):
+            ctypes.windll.user32.UnhookWinEvent(self._winevent_hook)
+            self._winevent_hook = None
+
+        # Stop all timers
+        self._spinner_timer.stop()
+        self._poll_timer.stop()
+        self._raise_timer.stop()
+
+        # Safety disconnect focusChanged (in case search mode is active)
+        try:
+            QApplication.instance().focusChanged.disconnect(self._on_focus_changed)
+        except (RuntimeError, TypeError):
+            pass
+
+        # Stop the media controller's event loop and thread
+        if hasattr(self, 'media'):
+            self.media.stop()
+
+        # Wait for login worker if in progress
+        if getattr(self, '_login_worker', None) and self._login_worker.isRunning():
+            self._login_worker.wait(3000)
+
     def closeEvent(self, event):
         """X button (or close()) hides to tray instead of quitting."""
         if self._search_mode:
             self._exit_search_mode()
         event.ignore()
         self.hide()
+
+    def showEvent(self, event):
+        """Resume polling and z-order timers when the widget becomes visible."""
+        super().showEvent(event)
+        if not self._poll_timer.isActive():
+            self._poll_timer.start(1000)
+        if not self._raise_timer.isActive():
+            self._raise_timer.start(250)
+
+    def hideEvent(self, event):
+        """Pause polling and z-order timers when the widget is hidden to save CPU."""
+        super().hideEvent(event)
+        # Don't stop timers during fullscreen hiding — _raise_timer drives
+        # fullscreen-end detection and must keep running
+        if not self._hidden_for_fullscreen:
+            self._poll_timer.stop()
+            self._raise_timer.stop()
 
     # ── hover: transparent ↔ solid background + search animation ──
 
@@ -610,6 +671,10 @@ class PlayerWidget(QWidget):
                 x = json.load(f).get("x", x)
         except (FileNotFoundError, json.JSONDecodeError, KeyError):
             pass
+
+        # Clamp x to visible screen bounds (handles resolution changes,
+        # external monitor disconnect, etc.)
+        x = max(full.left(), min(x, full.right() - self.width()))
 
         self.move(x, self._taskbar_y)
 

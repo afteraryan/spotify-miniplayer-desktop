@@ -449,9 +449,11 @@ class SearchPopup(QWidget):
             return
         if worker.isRunning():
             self._old_workers.append(worker)
-            worker.finished.connect(lambda w=worker: (
-                self._old_workers.remove(w) if w in self._old_workers else None
-            ))
+            worker.finished.connect(self._cleanup_old_workers)
+
+    def _cleanup_old_workers(self):
+        """Remove finished workers from the old-workers list."""
+        self._old_workers = [w for w in self._old_workers if w.isRunning()]
 
     def closeEvent(self, event):
         # Wait for all threads to fully stop before destroying
@@ -459,6 +461,9 @@ class SearchPopup(QWidget):
         for worker in all_workers:
             if worker is not None and worker.isRunning():
                 worker.wait(15000)
+        self._old_workers.clear()
+        self._worker = None
+        self._play_worker = None
         self.closed.emit()
         super().closeEvent(event)
 
