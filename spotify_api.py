@@ -23,10 +23,10 @@ class SpotifyAPI:
 
     def search_tracks(self, query, limit=8, offset=0):
         """
-        Search for tracks by name/artist.
+        Search for tracks and albums by name/artist.
 
         Returns a list of dicts on success:
-            [{"name", "artists", "album", "album_art_url", "uri", "duration_ms"}, ...]
+            [{"name", "artists", "album", "album_art_url", "uri", "duration_ms", "_type"}, ...]
         Returns None on error.
         """
         token = self.auth.get_access_token()
@@ -35,7 +35,7 @@ class SpotifyAPI:
 
         params = urlencode({
             "q": query,
-            "type": "track",
+            "type": "track,album",
             "limit": limit,
             "offset": offset,
         })
@@ -46,13 +46,32 @@ class SpotifyAPI:
             print(f"[api] Search failed: {e}")
             return None
 
-        results = []
+        # Parse album results (only on first page)
+        albums = []
+        if offset == 0:
+            for album in data.get("albums", {}).get("items", []):
+                images = album.get("images", [])
+                art_url = images[-1]["url"] if images else None
+                artists = ", ".join(
+                    a.get("name", "") for a in album.get("artists", [])
+                )
+                albums.append({
+                    "name": album.get("name", "Unknown"),
+                    "artists": artists,
+                    "album": "",
+                    "album_uri": album.get("uri", ""),
+                    "album_art_url": art_url,
+                    "uri": album.get("uri", ""),
+                    "_type": "album",
+                })
+
+        # Parse track results
+        tracks = []
         for track in data.get("tracks", {}).get("items", []):
             images = track.get("album", {}).get("images", [])
-            # Smallest image (64px) is last in the list
             art_url = images[-1]["url"] if images else None
 
-            results.append({
+            tracks.append({
                 "name": track.get("name", "Unknown"),
                 "artists": ", ".join(
                     a.get("name", "") for a in track.get("artists", [])
@@ -64,7 +83,33 @@ class SpotifyAPI:
                 "duration_ms": track.get("duration_ms", 0),
             })
 
-        return results
+        return albums, tracks
+
+    def add_to_queue(self, track_uri):
+        """Add a track to the user's playback queue.
+        Returns (True, None) on success, (False, error_message) on failure."""
+        token = self.auth.get_access_token()
+        if not token:
+            return False, "Not logged in"
+        try:
+            params = urlencode({"uri": track_uri})
+            req = urllib.request.Request(
+                f"{_BASE}/me/player/queue?{params}",
+                data=b"",
+                headers={"Authorization": f"Bearer {token}"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req):
+                pass
+            return True, None
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return False, "No active Spotify device"
+            elif e.code == 403:
+                return False, "Premium required"
+            return False, f"Queue error (HTTP {e.code})"
+        except Exception as e:
+            return False, f"Network error: {e}"
 
     def play_track(self, track_uri, context_uri=None):
         """

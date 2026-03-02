@@ -578,11 +578,13 @@ class PlayerWidget(QWidget):
 
     def _relaunch(self):
         """Restart the application."""
-        QApplication.quit()
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.py")
         subprocess.Popen(
-            [sys.executable] + sys.argv,
+            [sys.executable, script],
+            cwd=os.path.dirname(script),
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
+        QApplication.quit()
 
     def _toggle_autostart(self, checked):
         _set_autostart(checked)

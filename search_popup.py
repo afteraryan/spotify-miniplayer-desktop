@@ -21,6 +21,7 @@ from styles import (
     FONT_FAMILY, TEXT_COLOR, SUBTEXT_COLOR, BG_COLOR,
     ICON_SEARCH, ICON_CLOSE, SEARCH_POPUP_WIDTH,
     SEARCH_RESULT_HEIGHT, SEARCH_ART_SIZE,
+    ICON_QUEUE, ICON_QUEUED,
 )
 
 
@@ -68,18 +69,24 @@ class _SearchWorker(QThread):
         self.offset = offset
 
     def run(self):
-        tracks = self.api.search_tracks(self.query, offset=self.offset)
+        result = self.api.search_tracks(self.query, offset=self.offset)
 
         if self.offset > 0:
-            # Load-more request — just emit tracks, no playlists
-            self.more_ready.emit(tracks or [])
+            # Load-more request — just emit tracks, no playlists/albums
+            if result is None:
+                self.more_ready.emit([])
+            else:
+                _albums, tracks = result
+                self.more_ready.emit(tracks or [])
             return
 
         playlists = self.api.get_my_playlists(self.query) or []
 
-        if tracks is None and not playlists:
+        if result is None and not playlists:
             self.error.emit("Search failed")
             return
+
+        albums, tracks = result if result else ([], [])
 
         # Normalize playlist data to match track result format
         playlist_results = []
@@ -94,8 +101,28 @@ class _SearchWorker(QThread):
                 "_type": "playlist",
             })
 
-        # Playlists first, then tracks
-        combined = playlist_results + (tracks or [])
+        # Normalize album data
+        album_results = []
+        for a in albums[:3]:  # max 3 albums
+            a["artists"] = f"Album \u2022 {a['artists']}"
+            album_results.append(a)
+
+        # Playlists first, then tracks with albums interleaved naturally
+        track_list = tracks or []
+        # Insert albums at every ~3rd position among tracks
+        merged = []
+        ai = 0
+        for i, t in enumerate(track_list):
+            if ai < len(album_results) and i > 0 and i % 3 == 0:
+                merged.append(album_results[ai])
+                ai += 1
+            merged.append(t)
+        # Append any remaining albums at the end
+        while ai < len(album_results):
+            merged.append(album_results[ai])
+            ai += 1
+
+        combined = playlist_results + merged
         self.results_ready.emit(combined)
 
 
@@ -110,6 +137,19 @@ class _PlayWorker(QThread):
 
     def run(self):
         ok, msg = self.api.play_track(self.uri, self.context_uri)
+        self.finished.emit(ok, msg or "")
+
+
+class _QueueWorker(QThread):
+    finished = Signal(bool, str)  # success, error_message
+
+    def __init__(self, api, uri):
+        super().__init__()
+        self.api = api
+        self.uri = uri
+
+    def run(self):
+        ok, msg = self.api.add_to_queue(self.uri)
         self.finished.emit(ok, msg or "")
 
 
@@ -129,6 +169,7 @@ class SearchPopup(QWidget):
         self._inline = inline  # True = no header, driven by external input
         self._worker = None
         self._play_worker = None
+        self._queue_worker = None
         self._old_workers = []  # prevent GC of replaced threads still running
         self._net = QNetworkAccessManager(self)
         self._last_query = ""
@@ -342,6 +383,7 @@ class SearchPopup(QWidget):
         for track in results:
             item = _ResultItem(track, self._net)
             item.clicked.connect(self._play_track)
+            item.queue_clicked.connect(self._queue_track)
             self._results_layout.insertWidget(
                 self._results_layout.count() - 1, item  # before the stretch
             )
@@ -379,6 +421,7 @@ class SearchPopup(QWidget):
         for track in tracks:
             item = _ResultItem(track, self._net)
             item.clicked.connect(self._play_track)
+            item.queue_clicked.connect(self._queue_track)
             self._results_layout.insertWidget(
                 self._results_layout.count() - 1, item
             )
@@ -425,6 +468,25 @@ class SearchPopup(QWidget):
             self._status_label.setText(error_msg)
             self._status_label.show()
 
+    def _queue_track(self, uri, sender_item):
+        """Add a track to the playback queue."""
+        self._retire_worker(self._queue_worker)
+        self._queue_worker = _QueueWorker(self._api, uri)
+        self._queue_item = sender_item  # track which item triggered it
+        self._queue_worker.finished.connect(self._on_queue_finished)
+        self._queue_worker.start()
+
+    def _on_queue_finished(self, success, error_msg):
+        item = getattr(self, '_queue_item', None)
+        if success and item:
+            try:
+                item.show_queued()
+            except RuntimeError:
+                pass  # widget deleted
+        elif not success:
+            self._status_label.setText(error_msg)
+            self._status_label.show()
+
     # -- focus / keyboard ------------------------------------------------
 
     def focus_search_input(self):
@@ -457,7 +519,7 @@ class SearchPopup(QWidget):
 
     def closeEvent(self, event):
         # Wait for all threads to fully stop before destroying
-        all_workers = [self._worker, self._play_worker] + self._old_workers
+        all_workers = [self._worker, self._play_worker, self._queue_worker] + self._old_workers
         for worker in all_workers:
             if worker is not None and worker.isRunning():
                 worker.wait(15000)
@@ -512,14 +574,17 @@ class SearchPopup(QWidget):
 # -- result item ---------------------------------------------------------
 
 class _ResultItem(QWidget):
-    """A single search result row with album art, title, and artist."""
+    """A single search result row with album art, title, artist, and queue button."""
 
     clicked = Signal(str, str)  # emits (track_uri, album_uri) on click
+    queue_clicked = Signal(str, object)  # emits (track_uri, self) for queue
 
     def __init__(self, track_data, network_manager):
         super().__init__()
         self._uri = track_data["uri"]
-        self._is_playlist = track_data.get("_type") == "playlist"
+        self._type = track_data.get("_type", "track")
+        self._is_playlist = self._type == "playlist"
+        self._is_album = self._type == "album"
         self._context_uri = "" if self._is_playlist else track_data.get("album_uri", "")
         self._hovered = False
         self.setCursor(Qt.PointingHandCursor)
@@ -543,12 +608,14 @@ class _ResultItem(QWidget):
         text_col.setSpacing(1)
         text_col.setContentsMargins(0, 0, 0, 0)
 
-        name_color = "#1ED760" if self._is_playlist else TEXT_COLOR
+        name_color = "#1ED760" if (self._is_playlist or self._is_album) else TEXT_COLOR
         name_label = QLabel(track_data["name"])
         name_label.setFont(QFont(FONT_FAMILY, 11))
         name_label.setStyleSheet(f"color: {name_color}; background: transparent;")
+        # Leave more room for the queue button
+        elide_width = SEARCH_POPUP_WIDTH - 130
         fm = name_label.fontMetrics()
-        name_label.setText(fm.elidedText(track_data["name"], Qt.ElideRight, SEARCH_POPUP_WIDTH - 100))
+        name_label.setText(fm.elidedText(track_data["name"], Qt.ElideRight, elide_width))
         name_label.setToolTip(track_data["name"])
 
         detail = f"{track_data['artists']}"
@@ -558,7 +625,7 @@ class _ResultItem(QWidget):
         detail_label.setFont(QFont(FONT_FAMILY, 9))
         detail_label.setStyleSheet(f"color: {SUBTEXT_COLOR}; background: transparent;")
         fm2 = detail_label.fontMetrics()
-        detail_label.setText(fm2.elidedText(detail, Qt.ElideRight, SEARCH_POPUP_WIDTH - 100))
+        detail_label.setText(fm2.elidedText(detail, Qt.ElideRight, elide_width))
         detail_label.setToolTip(detail)
 
         text_col.addStretch()
@@ -566,6 +633,28 @@ class _ResultItem(QWidget):
         text_col.addWidget(detail_label)
         text_col.addStretch()
         layout.addLayout(text_col, 1)
+
+        # Queue button (tracks only — not playlists or albums)
+        self._queue_btn = None
+        if not self._is_playlist and not self._is_album:
+            self._queue_btn = QPushButton()
+            self._queue_btn.setFixedSize(28, 28)
+            self._queue_btn.setCursor(Qt.PointingHandCursor)
+            self._queue_btn.setIcon(self._svg_icon(ICON_QUEUE, 16))
+            self._queue_btn.setIconSize(QSize(16, 16))
+            self._queue_btn.setToolTip("Add to queue")
+            self._queue_btn.setStyleSheet("""
+                QPushButton {
+                    background: transparent;
+                    border: none;
+                    border-radius: 14px;
+                }
+                QPushButton:hover {
+                    background: rgba(255, 255, 255, 20);
+                }
+            """)
+            self._queue_btn.clicked.connect(self._on_queue_clicked)
+            layout.addWidget(self._queue_btn)
 
         # Load album art asynchronously
         art_url = track_data.get("album_art_url")
@@ -618,6 +707,48 @@ class _ResultItem(QWidget):
             p.setPen(Qt.NoPen)
             p.drawRect(0, 0, self.width(), self.height())
 
+    def _on_queue_clicked(self):
+        """Emit queue signal instead of play."""
+        self.queue_clicked.emit(self._uri, self)
+
+    def show_queued(self):
+        """Swap queue icon to checkmark briefly."""
+        if self._queue_btn:
+            self._queue_btn.setIcon(self._svg_icon(ICON_QUEUED, 16))
+            self._queue_btn.setToolTip("Added to queue")
+            self._queue_btn.setEnabled(False)
+            # Reset after 2 seconds
+            QTimer.singleShot(2000, self._reset_queue_btn)
+
+    def _reset_queue_btn(self):
+        try:
+            if self._queue_btn:
+                self._queue_btn.setIcon(self._svg_icon(ICON_QUEUE, 16))
+                self._queue_btn.setToolTip("Add to queue")
+                self._queue_btn.setEnabled(True)
+        except RuntimeError:
+            pass
+
+    @staticmethod
+    def _svg_icon(svg_str, size):
+        render_size = size * 4
+        renderer = QSvgRenderer(QByteArray(svg_str.encode()))
+        pixmap = QPixmap(render_size, render_size)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        renderer.render(painter)
+        painter.end()
+        return QIcon(pixmap)
+
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            self.clicked.emit(self._uri, self._context_uri)
+            # Don't trigger play if the queue button was clicked
+            child = self.childAt(event.position().toPoint())
+            if child is self._queue_btn:
+                return
+            if self._is_album:
+                # Play album from beginning (uri IS the context)
+                self.clicked.emit("", self._uri)
+            else:
+                self.clicked.emit(self._uri, self._context_uri)
