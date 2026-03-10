@@ -128,7 +128,8 @@ class PlayerWidget(QWidget):
         self._search_mode = False      # True while in inline search mode
         self._search_loading = False   # True while a search API call is in-flight
         self._spinner_angle = 0        # rotation angle for loading spinner
-        self._spotify_active = False   # True when SMTC reports a Spotify session
+        self._spotify_active = False   # True when any source reports playback
+        self._using_api_fallback = False  # True when using Web API instead of SMTC
 
         # Pre-build the two toggle icons
         self._icon_play = svg_to_icon(ICON_PLAY, ICON_SIZE)
@@ -267,13 +268,13 @@ class PlayerWidget(QWidget):
 
         # Playback buttons
         self.btn_prev = self._make_btn(
-            ICON_PREV, BUTTON_SIZE, ICON_SIZE, BUTTON_STYLE, self.media.prev_track
+            ICON_PREV, BUTTON_SIZE, ICON_SIZE, BUTTON_STYLE, self._on_prev
         )
         self.btn_play = self._make_btn(
             ICON_PLAY, BUTTON_SIZE, ICON_SIZE, BUTTON_STYLE, self._on_play_pause
         )
         self.btn_next = self._make_btn(
-            ICON_NEXT, BUTTON_SIZE, ICON_SIZE, BUTTON_STYLE, self.media.next_track
+            ICON_NEXT, BUTTON_SIZE, ICON_SIZE, BUTTON_STYLE, self._on_next
         )
         root.addWidget(self.btn_prev)
         root.addWidget(self.btn_play)
@@ -333,9 +334,34 @@ class PlayerWidget(QWidget):
     # ── play/pause with Spotify launch ────────────────────────
 
     def _on_play_pause(self):
-        """Toggle play/pause. If Spotify isn't running, launch it."""
-        if not self.media.play_pause():
-            self._launch_spotify()
+        """Toggle play/pause. SMTC first, Web API fallback, launch as last resort."""
+        if not self._using_api_fallback:
+            if self.media.play_pause():
+                return
+        # No SMTC session — try Web API (covers Spotify Web / other devices)
+        if self._spotify_active and self._spotify_auth.is_authenticated():
+            info = self._spotify_api.get_currently_playing()
+            if info:
+                if info["is_playing"]:
+                    self._spotify_api.pause()
+                else:
+                    self._spotify_api.resume()
+                return
+        self._launch_spotify()
+
+    def _on_prev(self):
+        """Previous track. SMTC or Web API depending on active source."""
+        if self._using_api_fallback and self._spotify_auth.is_authenticated():
+            self._spotify_api.prev_track()
+        else:
+            self.media.prev_track()
+
+    def _on_next(self):
+        """Next track. SMTC or Web API depending on active source."""
+        if self._using_api_fallback and self._spotify_auth.is_authenticated():
+            self._spotify_api.next_track()
+        else:
+            self.media.next_track()
 
     def _launch_spotify(self):
         """Launch Spotify exe directly."""
@@ -869,6 +895,9 @@ class PlayerWidget(QWidget):
         except Exception:
             info = None
 
+        # Track whether we're using SMTC or the Web API fallback
+        smtc_provided = info is not None
+
         # Fallback: no desktop Spotify session — try the Web API
         # (catches Spotify Web Player in browser, or playback on other devices)
         if info is None and self._spotify_auth.is_authenticated():
@@ -876,6 +905,8 @@ class PlayerWidget(QWidget):
                 info = self._spotify_api.get_currently_playing()
             except Exception:
                 pass
+
+        self._using_api_fallback = not smtc_provided and info is not None
 
         if info is None:
             self._spotify_active = False

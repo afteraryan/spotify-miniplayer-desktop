@@ -336,6 +336,68 @@ class SpotifyAPI:
         except Exception:
             return None
 
+    def pause(self):
+        """Pause playback via Web API."""
+        token = self.auth.get_access_token()
+        if not token:
+            return False
+        try:
+            req = urllib.request.Request(
+                f"{_BASE}/me/player/pause",
+                data=b"",
+                headers={"Authorization": f"Bearer {token}"},
+                method="PUT",
+            )
+            urllib.request.urlopen(req, timeout=3)
+            return True
+        except Exception:
+            return False
+
+    def resume(self):
+        """Resume playback via Web API."""
+        token = self.auth.get_access_token()
+        if not token:
+            return False
+        try:
+            _api_put_play({}, token)
+            return True
+        except Exception:
+            return False
+
+    def next_track(self):
+        """Skip to next track via Web API."""
+        token = self.auth.get_access_token()
+        if not token:
+            return False
+        try:
+            req = urllib.request.Request(
+                f"{_BASE}/me/player/next",
+                data=b"",
+                headers={"Authorization": f"Bearer {token}"},
+                method="POST",
+            )
+            urllib.request.urlopen(req, timeout=3)
+            return True
+        except Exception:
+            return False
+
+    def prev_track(self):
+        """Skip to previous track via Web API."""
+        token = self.auth.get_access_token()
+        if not token:
+            return False
+        try:
+            req = urllib.request.Request(
+                f"{_BASE}/me/player/previous",
+                data=b"",
+                headers={"Authorization": f"Bearer {token}"},
+                method="POST",
+            )
+            urllib.request.urlopen(req, timeout=3)
+            return True
+        except Exception:
+            return False
+
     def get_my_playlists(self, query=None):
         """
         Fetch the user's playlists (cached after first call).
