@@ -477,13 +477,14 @@ class SearchPopup(QWidget):
         self._queue_worker.start()
 
     def _on_queue_finished(self, success, error_msg):
-        item = getattr(self, '_queue_item', None)
-        if success and item:
-            try:
-                item.show_queued()
-            except RuntimeError:
-                pass  # widget deleted
-        elif not success:
+        if not success:
+            # Revert the optimistic tick
+            item = getattr(self, '_queue_item', None)
+            if item:
+                try:
+                    item._reset_queue_btn()
+                except RuntimeError:
+                    pass
             self._status_label.setText(error_msg)
             self._status_label.show()
 
@@ -708,7 +709,8 @@ class _ResultItem(QWidget):
             p.drawRect(0, 0, self.width(), self.height())
 
     def _on_queue_clicked(self):
-        """Emit queue signal instead of play."""
+        """Emit queue signal instead of play. Show tick immediately (optimistic)."""
+        self.show_queued()
         self.queue_clicked.emit(self._uri, self)
 
     def show_queued(self):
@@ -741,14 +743,12 @@ class _ResultItem(QWidget):
         painter.end()
         return QIcon(pixmap)
 
-    def mousePressEvent(self, event):
+    def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton:
-            # Don't trigger play if the queue button was clicked
-            child = self.childAt(event.position().toPoint())
-            if child is self._queue_btn:
+            # Skip if the queue button handled this click
+            if self._queue_btn and self._queue_btn.underMouse():
                 return
             if self._is_album:
-                # Play album from beginning (uri IS the context)
                 self.clicked.emit("", self._uri)
             else:
                 self.clicked.emit(self._uri, self._context_uri)
