@@ -20,6 +20,8 @@ class SpotifyAPI:
     def __init__(self, auth):
         self.auth = auth
         self._playlist_cache = None
+        self._last_art_url = None
+        self._last_art_bytes = None
 
     def search_tracks(self, query, limit=8, offset=0):
         """
@@ -264,6 +266,75 @@ class SpotifyAPI:
 
         except Exception as e:
             print(f"[api] Queue cleanup failed (non-fatal): {e}")
+
+    def get_currently_playing(self):
+        """
+        Get the currently playing track via the Spotify Web API.
+        Returns a dict matching MediaController.get_media_info() format, or None.
+
+        Used as a fallback when SMTC has no Spotify desktop session
+        (e.g. playing on Spotify Web in a browser).
+        """
+        token = self.auth.get_access_token()
+        if not token:
+            return None
+
+        try:
+            req = urllib.request.Request(
+                f"{_BASE}/me/player",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                body = resp.read()
+                if not body:
+                    return None
+                data = json.loads(body)
+        except Exception:
+            return None
+
+        if not data or not data.get("item"):
+            return None
+
+        item = data["item"]
+
+        # Only handle tracks (not episodes/podcasts)
+        if item.get("type") != "track":
+            return None
+
+        title = item.get("name", "Unknown Title")
+        artists = ", ".join(a.get("name", "") for a in item.get("artists", []))
+
+        position = data.get("progress_ms", 0) / 1000.0
+        duration = item.get("duration_ms", 0) / 1000.0
+
+        # Album art — cached to avoid re-downloading every poll
+        images = item.get("album", {}).get("images", [])
+        art_url = images[-1]["url"] if images else None
+        thumbnail = self._get_cached_thumbnail(art_url)
+
+        return {
+            "title": title,
+            "artist": artists,
+            "is_playing": data.get("is_playing", False),
+            "thumbnail": thumbnail,
+            "position": position,
+            "duration": duration,
+        }
+
+    def _get_cached_thumbnail(self, url):
+        """Download and cache album art. Returns bytes or None."""
+        if not url:
+            return None
+        if url == self._last_art_url:
+            return self._last_art_bytes
+        try:
+            with urllib.request.urlopen(url, timeout=2) as resp:
+                data = resp.read()
+            self._last_art_url = url
+            self._last_art_bytes = data
+            return data
+        except Exception:
+            return None
 
     def get_my_playlists(self, query=None):
         """

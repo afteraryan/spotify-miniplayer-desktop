@@ -867,7 +867,15 @@ class PlayerWidget(QWidget):
         try:
             info = self.media.get_media_info()
         except Exception:
-            return
+            info = None
+
+        # Fallback: no desktop Spotify session — try the Web API
+        # (catches Spotify Web Player in browser, or playback on other devices)
+        if info is None and self._spotify_auth.is_authenticated():
+            try:
+                info = self._spotify_api.get_currently_playing()
+            except Exception:
+                pass
 
         if info is None:
             self._spotify_active = False
