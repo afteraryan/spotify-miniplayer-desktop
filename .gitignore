@@ -9,6 +9,9 @@ config.json
 # OAuth tokens (SECURITY CRITICAL — never commit)
 tokens.json
 
+# API rate-limit state
+.rate_limit
+
 # Debug artifacts
 debug.log
 nul

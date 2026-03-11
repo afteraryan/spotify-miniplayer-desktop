@@ -8,6 +8,7 @@ System tray icon for show/hide, auto-start, and quit.
 import os
 import sys
 import json
+import time
 import ctypes
 import ctypes.wintypes as wintypes
 import subprocess
@@ -130,6 +131,10 @@ class PlayerWidget(QWidget):
         self._spinner_angle = 0        # rotation angle for loading spinner
         self._spotify_active = False   # True when any source reports playback
         self._using_api_fallback = False  # True when using Web API instead of SMTC
+        self._api_poll_interval = 5.0     # seconds between Web API polls
+        self._last_api_poll = 0.0         # timestamp of last Web API attempt
+        self._api_cached_info = None      # last successful Web API result
+        self._api_cache_time = 0.0        # when the cached result was fetched
 
         # Pre-build the two toggle icons
         self._icon_play = svg_to_icon(ICON_PLAY, ICON_SIZE)
@@ -334,19 +339,40 @@ class PlayerWidget(QWidget):
     # ── play/pause with Spotify launch ────────────────────────
 
     def _on_play_pause(self):
-        """Toggle play/pause. SMTC first, Web API fallback, launch as last resort."""
-        if not self._using_api_fallback:
-            if self.media.play_pause():
-                return
-        # No SMTC session — try Web API (covers Spotify Web / other devices)
-        if self._spotify_active and self._spotify_auth.is_authenticated():
+        """Toggle play/pause. SMTC first, Web API sync, launch as last resort."""
+        # Already in API fallback mode — control via Web API
+        if self._using_api_fallback and self._spotify_auth.is_authenticated():
+            if self._api_cached_info and self._api_cached_info["is_playing"]:
+                self._spotify_api.pause()
+            else:
+                self._spotify_api.resume()
+            # Force an immediate API poll to refresh state
+            self._last_api_poll = 0.0
+            return
+
+        # Try SMTC (desktop Spotify)
+        if self.media.play_pause():
+            return
+
+        # No desktop session — check Web API for active web/device playback
+        if self._spotify_auth.is_authenticated():
             info = self._spotify_api.get_currently_playing()
             if info:
+                # Found web playback — sync with it
+                self._using_api_fallback = True
+                self._api_cached_info = info
+                self._api_cache_time = time.time()
+                self._last_api_poll = time.time()
+                self._apply_media_info(info)
                 if info["is_playing"]:
                     self._spotify_api.pause()
                 else:
                     self._spotify_api.resume()
+                # Force refresh on next poll
+                self._last_api_poll = 0.0
                 return
+
+        # Nothing anywhere — launch Spotify Desktop
         self._launch_spotify()
 
     def _on_prev(self):
@@ -879,7 +905,8 @@ class PlayerWidget(QWidget):
         if self._seeking and self._duration > 0:
             frac = max(0.0, min(1.0, event.position().x() / self.width()))
             self._progress = frac
-            self.media.seek(frac * self._duration)
+            if not self._using_api_fallback:
+                self.media.seek(frac * self._duration)
             self.update()
         # If we were dragging, save the new position
         elif self._drag_pos:
@@ -895,18 +922,38 @@ class PlayerWidget(QWidget):
         except Exception:
             info = None
 
-        # Track whether we're using SMTC or the Web API fallback
         smtc_provided = info is not None
 
-        # Fallback: no desktop Spotify session — try the Web API
-        # (catches Spotify Web Player in browser, or playback on other devices)
-        if info is None and self._spotify_auth.is_authenticated():
-            try:
-                info = self._spotify_api.get_currently_playing()
-            except Exception:
-                pass
+        # SMTC found desktop Spotify — exit API fallback mode
+        if smtc_provided and self._using_api_fallback:
+            self._using_api_fallback = False
+            self._api_cached_info = None
 
-        self._using_api_fallback = not smtc_provided and info is not None
+        # API fallback mode: user synced via play button, poll Web API at 5s
+        if not smtc_provided and self._using_api_fallback:
+            now = time.time()
+            if now - self._last_api_poll >= self._api_poll_interval:
+                self._last_api_poll = now
+                try:
+                    api_info = self._spotify_api.get_currently_playing()
+                    if api_info is not None:
+                        self._api_cached_info = api_info
+                        self._api_cache_time = now
+                    else:
+                        # Web playback ended — exit fallback mode
+                        self._using_api_fallback = False
+                        self._api_cached_info = None
+                    info = api_info
+                except Exception:
+                    pass
+            elif self._api_cached_info is not None:
+                # Between API polls: interpolate progress from last known state
+                info = dict(self._api_cached_info)
+                elapsed = now - self._api_cache_time
+                if info["is_playing"] and info["duration"] > 0:
+                    info["position"] = min(
+                        info["position"] + elapsed, info["duration"]
+                    )
 
         if info is None:
             self._spotify_active = False
@@ -922,6 +969,10 @@ class PlayerWidget(QWidget):
                 self.update()
             return
 
+        self._apply_media_info(info)
+
+    def _apply_media_info(self, info):
+        """Update the widget display from a media info dict (SMTC or Web API)."""
         self._spotify_active = True
 
         # Progress bar (updates every poll even if song hasn't changed)

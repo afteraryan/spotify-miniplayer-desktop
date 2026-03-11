@@ -5,6 +5,7 @@ Thin wrapper around the Spotify Web API endpoints we need:
 """
 
 import json
+import os
 import threading
 import time
 import urllib.request
@@ -12,6 +13,9 @@ import urllib.error
 from urllib.parse import urlencode
 
 _BASE = "https://api.spotify.com/v1"
+_RATE_LIMIT_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), ".rate_limit"
+)
 
 
 class SpotifyAPI:
@@ -22,6 +26,7 @@ class SpotifyAPI:
         self._playlist_cache = None
         self._last_art_url = None
         self._last_art_bytes = None
+        self._rate_limited_until = self._load_rate_limit()
 
     def search_tracks(self, query, limit=8, offset=0):
         """
@@ -279,6 +284,10 @@ class SpotifyAPI:
         if not token:
             return None
 
+        # Respect rate-limit backoff
+        if time.time() < self._rate_limited_until:
+            return None
+
         try:
             req = urllib.request.Request(
                 f"{_BASE}/me/player",
@@ -289,6 +298,12 @@ class SpotifyAPI:
                 if not body:
                     return None
                 data = json.loads(body)
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                retry_after = int(e.headers.get("Retry-After", 10))
+                self._rate_limited_until = time.time() + retry_after
+                self._save_rate_limit()
+            return None
         except Exception:
             return None
 
@@ -335,6 +350,30 @@ class SpotifyAPI:
             return data
         except Exception:
             return None
+
+    def is_rate_limited(self):
+        """True if we're currently rate-limited by Spotify."""
+        return time.time() < self._rate_limited_until
+
+    @staticmethod
+    def _load_rate_limit():
+        """Load persisted rate-limit timestamp (survives app restarts)."""
+        try:
+            with open(_RATE_LIMIT_FILE) as f:
+                until = float(f.read().strip())
+            if until > time.time():
+                return until
+        except (FileNotFoundError, ValueError):
+            pass
+        return 0.0
+
+    def _save_rate_limit(self):
+        """Persist the rate-limit timestamp to disk."""
+        try:
+            with open(_RATE_LIMIT_FILE, "w") as f:
+                f.write(str(self._rate_limited_until))
+        except OSError:
+            pass
 
     def pause(self):
         """Pause playback via Web API."""
