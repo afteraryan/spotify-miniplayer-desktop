@@ -2,6 +2,10 @@
 
 A compact music controller widget that sits directly ON the Windows 11 taskbar, showing the currently playing Spotify track with album art, playback controls, and a seekable progress bar. Now-playing reads from Windows SMTC (no API needed). Search & play uses the Spotify Web API with PKCE authentication.
 
+## TODO: Event-driven architecture rewrite
+
+The playback state management in widget.py is patched together with if-else branches and scattered cache mutations. It works but causes state sync bugs when extending. The full plan is in `PLAN_event_architecture.md`. Do this the next time playback logic needs to change.
+
 ## User Profile
 
 The user is **not a developer** — they're a tinkerer. Explain things clearly (the *why*, not just the *what*). Don't assume familiarity with programming concepts.
