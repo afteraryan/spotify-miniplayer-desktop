@@ -12,6 +12,7 @@ import time
 import ctypes
 import ctypes.wintypes as wintypes
 import subprocess
+import threading
 import winreg
 
 from PySide6.QtWidgets import (
@@ -19,7 +20,7 @@ from PySide6.QtWidgets import (
     QApplication, QSystemTrayIcon, QMenu, QStackedWidget,
 )
 from PySide6.QtCore import (
-    Qt, QTimer, QSize, QByteArray, QPoint,
+    Qt, QTimer, QSize, QByteArray, QPoint, Signal,
     QPropertyAnimation, QEasingCurve,
 )
 from PySide6.QtGui import (
@@ -104,8 +105,11 @@ def svg_to_icon(svg_str, size):
 # ── widget ────────────────────────────────────────────────────
 
 class PlayerWidget(QWidget):
+    _web_check_done = Signal(object)  # thread-safe signal for Web API result
+
     def __init__(self):
         super().__init__()
+        self._web_check_done.connect(self._on_web_check_done)
 
         # Window: frameless, always on top, no taskbar entry (Tool flag)
         self.setWindowFlags(
@@ -129,6 +133,8 @@ class PlayerWidget(QWidget):
         self._search_mode = False      # True while in inline search mode
         self._search_loading = False   # True while a search API call is in-flight
         self._spinner_angle = 0        # rotation angle for loading spinner
+        self._spinner_target = "search"  # which button the spinner is on
+        self._play_loading = False     # True while checking Web API on play press
         self._spotify_active = False   # True when any source reports playback
         self._using_api_fallback = False  # True when using Web API instead of SMTC
         self._api_poll_interval = 5.0     # seconds between Web API polls
@@ -152,10 +158,10 @@ class PlayerWidget(QWidget):
         _lr_renderer.render(_lr_p)
         _lr_p.end()
 
-        # Spinner timer (rotates the search icon while loading)
+        # Spinner timer (rotates the loading icon on search or play button)
         self._spinner_timer = QTimer(self)
         self._spinner_timer.setInterval(30)
-        self._spinner_timer.timeout.connect(self._spin_search_icon)
+        self._spinner_timer.timeout.connect(self._spin_icon)
 
         # Media controller (talks to Windows SMTC on a background thread)
         self.media = MediaController()
@@ -354,25 +360,53 @@ class PlayerWidget(QWidget):
         if self.media.play_pause():
             return
 
-        # No desktop session — check Web API for active web/device playback
+        # No desktop session — check Web API on a background thread
         if self._spotify_auth.is_authenticated():
-            info = self._spotify_api.get_currently_playing()
-            if info:
-                # Found web playback — sync with it
-                self._using_api_fallback = True
-                self._api_cached_info = info
-                self._api_cache_time = time.time()
-                self._last_api_poll = time.time()
-                self._apply_media_info(info)
-                if info["is_playing"]:
-                    self._spotify_api.pause()
-                else:
-                    self._spotify_api.resume()
-                # Force refresh on next poll
-                self._last_api_poll = 0.0
-                return
+            self._set_play_loading(True)
+            threading.Thread(target=self._check_web_playback, daemon=True).start()
+            return
 
         # Nothing anywhere — launch Spotify Desktop
+        self._launch_spotify()
+
+    def _set_play_loading(self, loading):
+        """Toggle spinner on the play button."""
+        self._play_loading = loading
+        if loading:
+            self._spinner_angle = 0
+            self._spinner_target = "play"
+            self._spinner_timer.start()
+        else:
+            if self._spinner_target == "play":
+                self._spinner_timer.stop()
+            # Restore the correct play/pause icon
+            is_playing = (self._api_cached_info or {}).get("is_playing", False)
+            self.btn_play.setIcon(
+                self._icon_pause if is_playing else self._icon_play
+            )
+
+    def _check_web_playback(self):
+        """Background thread: check Web API, then update UI via signal."""
+        try:
+            info = self._spotify_api.get_currently_playing()
+        except Exception:
+            info = None
+        self._web_check_done.emit(info)
+
+    def _on_web_check_done(self, info):
+        """Main thread: handle the Web API result."""
+        self._set_play_loading(False)
+        if info:
+            # Found web playback — sync with it
+            self._using_api_fallback = True
+            self._api_cached_info = info
+            self._api_cache_time = time.time()
+            self._last_api_poll = 0.0
+            self._apply_media_info(info)
+            if not info["is_playing"]:
+                self._spotify_api.resume()
+            return
+        # Nothing on web either — launch Spotify Desktop
         self._launch_spotify()
 
     def _on_prev(self):
@@ -552,13 +586,14 @@ class PlayerWidget(QWidget):
         self._search_loading = loading
         if loading:
             self._spinner_angle = 0
+            self._spinner_target = "search"
             self._spinner_timer.start()
         else:
             self._spinner_timer.stop()
             self.btn_search.setIcon(self._icon_search)
 
-    def _spin_search_icon(self):
-        """Rotate the cached loading pixmap to create a spinner effect."""
+    def _spin_icon(self):
+        """Rotate the cached loading pixmap and apply to the active target button."""
         self._spinner_angle = (self._spinner_angle + 8) % 360
         t = QTransform()
         sz = self._spinner_base.width()
@@ -571,7 +606,11 @@ class PlayerWidget(QWidget):
             cx = (rotated.width() - sz) // 2
             cy = (rotated.height() - sz) // 2
             rotated = rotated.copy(cx, cy, sz, sz)
-        self.btn_search.setIcon(QIcon(rotated))
+        icon = QIcon(rotated)
+        if self._spinner_target == "play":
+            self.btn_play.setIcon(icon)
+        else:
+            self.btn_search.setIcon(icon)
 
     # ── system tray ───────────────────────────────────────────
 
@@ -905,7 +944,13 @@ class PlayerWidget(QWidget):
         if self._seeking and self._duration > 0:
             frac = max(0.0, min(1.0, event.position().x() / self.width()))
             self._progress = frac
-            if not self._using_api_fallback:
+            if self._using_api_fallback:
+                self._spotify_api.seek(frac * self._duration)
+                # Update cache so interpolation starts from the new position
+                if self._api_cached_info is not None:
+                    self._api_cached_info["position"] = frac * self._duration
+                    self._api_cache_time = time.time()
+            else:
                 self.media.seek(frac * self._duration)
             self.update()
         # If we were dragging, save the new position

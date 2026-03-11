@@ -437,6 +437,24 @@ class SpotifyAPI:
         except Exception:
             return False
 
+    def seek(self, position_seconds):
+        """Seek to a position (in seconds) via Web API."""
+        token = self.auth.get_access_token()
+        if not token:
+            return False
+        position_ms = int(position_seconds * 1000)
+        try:
+            req = urllib.request.Request(
+                f"{_BASE}/me/player/seek?position_ms={position_ms}",
+                data=b"",
+                headers={"Authorization": f"Bearer {token}"},
+                method="PUT",
+            )
+            urllib.request.urlopen(req, timeout=3)
+            return True
+        except Exception:
+            return False
+
     def get_my_playlists(self, query=None):
         """
         Fetch the user's playlists (cached after first call).
