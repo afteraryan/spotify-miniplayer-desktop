@@ -350,10 +350,19 @@ class PlayerWidget(QWidget):
         if self._using_api_fallback and self._spotify_auth.is_authenticated():
             if self._api_cached_info and self._api_cached_info["is_playing"]:
                 self._spotify_api.pause()
+                self._api_cached_info["is_playing"] = False
             else:
                 self._spotify_api.resume()
-            # Force an immediate API poll to refresh state
-            self._last_api_poll = 0.0
+                if self._api_cached_info:
+                    self._api_cached_info["is_playing"] = True
+            # Update button icon immediately — don't wait for next poll
+            is_playing = (self._api_cached_info or {}).get("is_playing", False)
+            self.btn_play.setIcon(
+                self._icon_pause if is_playing else self._icon_play
+            )
+            self._api_cache_time = time.time()
+            # Let optimistic state hold — don't poll until Spotify catches up
+            self._last_api_poll = time.time()
             return
 
         # Try SMTC (desktop Spotify)
@@ -413,6 +422,8 @@ class PlayerWidget(QWidget):
         """Previous track. SMTC or Web API depending on active source."""
         if self._using_api_fallback and self._spotify_auth.is_authenticated():
             self._spotify_api.prev_track()
+            # Give Spotify 2s to change tracks before polling
+            self._last_api_poll = time.time() - self._api_poll_interval + 2
         else:
             self.media.prev_track()
 
@@ -420,6 +431,8 @@ class PlayerWidget(QWidget):
         """Next track. SMTC or Web API depending on active source."""
         if self._using_api_fallback and self._spotify_auth.is_authenticated():
             self._spotify_api.next_track()
+            # Give Spotify 2s to change tracks before polling
+            self._last_api_poll = time.time() - self._api_poll_interval + 2
         else:
             self.media.next_track()
 
