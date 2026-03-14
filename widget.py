@@ -410,7 +410,7 @@ class PlayerWidget(QWidget):
             self._using_api_fallback = True
             self._api_cached_info = info
             self._api_cache_time = time.time()
-            self._last_api_poll = 0.0
+            self._last_api_poll = time.time()
             self._apply_media_info(info)
             if not info["is_playing"]:
                 self._spotify_api.resume()
@@ -982,10 +982,17 @@ class PlayerWidget(QWidget):
 
         smtc_provided = info is not None
 
-        # SMTC found desktop Spotify — exit API fallback mode
+        # SMTC found desktop Spotify — exit API fallback only if
+        # desktop is actively playing. An idle/stale SMTC session
+        # (e.g. Spotify open but not playing) must not override web data.
         if smtc_provided and self._using_api_fallback:
-            self._using_api_fallback = False
-            self._api_cached_info = None
+            if info.get("is_playing"):
+                self._using_api_fallback = False
+                self._api_cached_info = None
+            else:
+                # Ignore idle SMTC — keep using web API
+                smtc_provided = False
+                info = None
 
         # API fallback mode: user synced via play button, poll Web API at 5s
         if not smtc_provided and self._using_api_fallback:
